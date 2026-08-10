@@ -57,10 +57,28 @@ describe('AppController (e2e)', () => {
         .send({ email, password })
         .expect(200);
 
-      expect(hasAccessToken(response.body)).toBe(true);
+      if (!hasAccessToken(response.body)) {
+        throw new Error('Expected an access token');
+      }
+
+      await request(app.getHttpServer())
+        .get('/auth/me')
+        .set('Authorization', `Bearer ${response.body.accessToken}`)
+        .expect(200);
     } finally {
       await prisma.user.deleteMany({ where: { email } });
     }
+  });
+
+  it('/auth/me (GET) rejects unauthenticated requests', () => {
+    return request(app.getHttpServer()).get('/auth/me').expect(401);
+  });
+
+  it('/auth/me (GET) rejects an invalid token', () => {
+    return request(app.getHttpServer())
+      .get('/auth/me')
+      .set('Authorization', 'Bearer invalid-token')
+      .expect(401);
   });
 
   afterEach(async () => {
