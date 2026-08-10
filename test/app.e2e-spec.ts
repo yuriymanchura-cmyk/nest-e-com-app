@@ -1,8 +1,19 @@
-import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
+import { Test, TestingModule } from '@nestjs/testing';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { PrismaService } from './../src/prisma/prisma.service';
+
+function hasAccessToken(value: unknown): value is { accessToken: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'accessToken' in value &&
+    typeof value.accessToken === 'string'
+  );
+}
 
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
@@ -28,6 +39,28 @@ describe('AppController (e2e)', () => {
       .get('/health')
       .expect(200)
       .expect({ status: 'ok' });
+  });
+
+  it('/auth/login (POST)', async () => {
+    const email = `e2e-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const prisma = app.get(PrismaService);
+
+    try {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const response = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      expect(hasAccessToken(response.body)).toBe(true);
+    } finally {
+      await prisma.user.deleteMany({ where: { email } });
+    }
   });
 
   afterEach(async () => {

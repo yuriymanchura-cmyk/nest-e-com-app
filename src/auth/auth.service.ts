@@ -1,12 +1,21 @@
 import * as argon2 from 'argon2';
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { JwtService } from '@nestjs/jwt';
 import { RegisterDto } from './dto/register.dto';
 import { Prisma } from '../generated/prisma/client';
+import { LoginDto } from './dto/login.dto';
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+  ) {}
 
   async findByEmail(email: string) {
     return this.prisma.user.findUnique({
@@ -45,5 +54,30 @@ export class AuthService {
       }
       throw error;
     }
+  }
+
+  async login(dto: LoginDto) {
+    const email = dto.email.trim().toLowerCase();
+    const user = await this.findByEmail(email);
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+
+    const isPasswordValid = await argon2.verify(
+      user.passwordHash,
+      dto.password,
+    );
+
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+
+    return {
+      accessToken: await this.jwtService.signAsync({
+        sub: user.id,
+        role: user.role,
+      }),
+    };
   }
 }

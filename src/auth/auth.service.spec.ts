@@ -1,8 +1,10 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from './auth.service';
+import { JwtService } from '@nestjs/jwt';
+import * as argon2 from 'argon2';
 
 describe('AuthService', () => {
   let authService: AuthService;
@@ -14,6 +16,10 @@ describe('AuthService', () => {
     },
   };
 
+  const jwtService = {
+    signAsync: jest.fn(),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -21,6 +27,10 @@ describe('AuthService', () => {
         {
           provide: PrismaService,
           useValue: prismaService,
+        },
+        {
+          provide: JwtService,
+          useValue: jwtService,
         },
       ],
     }).compile();
@@ -80,5 +90,70 @@ describe('AuthService', () => {
         password: 'secure-password-123',
       }),
     ).rejects.toThrow(ConflictException);
+  });
+
+  it('returns an access token for valid credentials', async () => {
+    const password = 'secure-password-123';
+    const passwordHash = await argon2.hash(password);
+
+    prismaService.user.findUnique.mockResolvedValue({
+      id: 'user-id',
+      email: 'user@example.com',
+      passwordHash,
+      role: 'CUSTOMER',
+      isActive: true,
+    });
+    jwtService.signAsync.mockResolvedValue('access-token');
+
+    const result = await authService.login({
+      email: ' USER@EXAMPLE.COM ',
+      password,
+    });
+
+    expect(result).toEqual({ accessToken: 'access-token' });
+    expect(jwtService.signAsync).toHaveBeenCalledWith({
+      sub: 'user-id',
+      role: 'CUSTOMER',
+    });
+  });
+
+  it('rejects login with a wrong password', async () => {
+    const passwordHash = await argon2.hash('correct-password-123');
+
+    prismaService.user.findUnique.mockResolvedValue({
+      id: 'user-id',
+      email: 'user@example.com',
+      passwordHash,
+      role: 'CUSTOMER',
+      isActive: true,
+    });
+
+    await expect(
+      authService.login({
+        email: 'user@example.com',
+        password: 'wrong-password-123',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+
+    expect(jwtService.signAsync).not.toHaveBeenCalled();
+  });
+
+  it('rejects login for an inactive user', async () => {
+    prismaService.user.findUnique.mockResolvedValue({
+      id: 'user-id',
+      email: 'user@example.com',
+      passwordHash: 'unused-password-hash',
+      role: 'CUSTOMER',
+      isActive: false,
+    });
+
+    await expect(
+      authService.login({
+        email: 'user@example.com',
+        password: 'secure-password-123',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+
+    expect(jwtService.signAsync).not.toHaveBeenCalled();
   });
 });
