@@ -4,7 +4,26 @@ import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from './auth.service';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
+
+type CreateRefreshTokenArgs = {
+  data: {
+    id: string;
+    userId: string;
+    tokenHash: string;
+    expiresAt: Date;
+  };
+};
+
+let createdRefreshTokenArgs: CreateRefreshTokenArgs | undefined;
+
+const createRefreshToken = jest.fn(
+  (args: CreateRefreshTokenArgs): Promise<void> => {
+    createdRefreshTokenArgs = args;
+    return Promise.resolve();
+  },
+);
 
 describe('AuthService', () => {
   let authService: AuthService;
@@ -14,10 +33,18 @@ describe('AuthService', () => {
       findUnique: jest.fn(),
       create: jest.fn(),
     },
+    refreshToken: {
+      create: createRefreshToken,
+    },
   };
 
   const jwtService = {
     signAsync: jest.fn(),
+    decode: jest.fn(),
+  };
+
+  const configService = {
+    getOrThrow: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -32,11 +59,22 @@ describe('AuthService', () => {
           provide: JwtService,
           useValue: jwtService,
         },
+        {
+          provide: ConfigService,
+          useValue: configService,
+        },
       ],
     }).compile();
 
     authService = module.get<AuthService>(AuthService);
     jest.resetAllMocks();
+    createdRefreshTokenArgs = undefined;
+    createRefreshToken.mockImplementation(
+      (args: CreateRefreshTokenArgs): Promise<void> => {
+        createdRefreshTokenArgs = args;
+        return Promise.resolve();
+      },
+    );
   });
 
   it('throws ConflictException when email is already registered', async () => {
@@ -103,14 +141,42 @@ describe('AuthService', () => {
       role: 'CUSTOMER',
       isActive: true,
     });
-    jwtService.signAsync.mockResolvedValue('access-token');
 
+    jwtService.signAsync
+      .mockResolvedValueOnce('access-token')
+      .mockResolvedValueOnce('refresh-token');
+
+    jwtService.decode.mockReturnValue({
+      exp: 1780000000,
+    });
+
+    configService.getOrThrow
+      .mockReturnValueOnce('refresh-secret')
+      .mockReturnValueOnce('7d');
     const result = await authService.login({
       email: ' USER@EXAMPLE.COM ',
       password,
     });
 
-    expect(result).toEqual({ accessToken: 'access-token' });
+    expect(result).toEqual({
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+    });
+
+    expect(createRefreshToken).toHaveBeenCalledTimes(1);
+
+    if (!createdRefreshTokenArgs) {
+      throw new Error('Refresh token session was not created');
+    }
+
+    expect(createdRefreshTokenArgs.data.userId).toBe('user-id');
+    expect(typeof createdRefreshTokenArgs.data.id).toBe('string');
+    expect(typeof createdRefreshTokenArgs.data.tokenHash).toBe('string');
+    expect(createdRefreshTokenArgs.data.tokenHash).not.toBe('refresh-token');
+    expect(createdRefreshTokenArgs.data.expiresAt).toEqual(
+      new Date(1780000000 * 1000),
+    );
+
     expect(jwtService.signAsync).toHaveBeenCalledWith({
       sub: 'user-id',
       role: 'CUSTOMER',

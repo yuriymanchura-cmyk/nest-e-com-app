@@ -15,6 +15,19 @@ function hasAccessToken(value: unknown): value is { accessToken: string } {
   );
 }
 
+function hasTokenPair(
+  value: unknown,
+): value is { accessToken: string; refreshToken: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'accessToken' in value &&
+    typeof value.accessToken === 'string' &&
+    'refreshToken' in value &&
+    typeof value.refreshToken === 'string'
+  );
+}
+
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
@@ -79,6 +92,48 @@ describe('AppController (e2e)', () => {
       .get('/auth/me')
       .set('Authorization', 'Bearer invalid-token')
       .expect(401);
+  });
+
+  it('/auth/refresh (POST) rotates refresh tokens', async () => {
+    const email = `e2e-refresh-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const prisma = app.get(PrismaService);
+
+    try {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const loginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasTokenPair(loginResponse.body)) {
+        throw new Error('Expected access and refresh tokens');
+      }
+
+      const oldRefreshToken = loginResponse.body.refreshToken;
+
+      const refreshResponse = await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: oldRefreshToken })
+        .expect(200);
+
+      if (!hasTokenPair(refreshResponse.body)) {
+        throw new Error('Expected rotated access and refresh tokens');
+      }
+
+      expect(refreshResponse.body.refreshToken).not.toBe(oldRefreshToken);
+
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: oldRefreshToken })
+        .expect(401);
+    } finally {
+      await prisma.user.deleteMany({ where: { email } });
+    }
   });
 
   afterEach(async () => {
