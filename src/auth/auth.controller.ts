@@ -38,6 +38,12 @@ export class AuthController {
     return this.authService.refresh(dto);
   }
 
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Post('logout')
+  logout(@Body() dto: RefreshTokenDto): Promise<void> {
+    return this.authService.logout(dto);
+  }
+
   @UseGuards(JwtAuthGuard)
   @Get('me')
   getCurrentUser(@Req() request: AuthenticatedRequest) {

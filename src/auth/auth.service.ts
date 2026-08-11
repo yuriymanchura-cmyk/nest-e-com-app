@@ -259,6 +259,21 @@ export class AuthService {
     };
   }
 
+  async logout(dto: RefreshTokenDto): Promise<void> {
+    const payload = await this.verifyRefreshToken(dto.refreshToken);
+
+    await this.prisma.refreshToken.updateMany({
+      where: {
+        id: payload.jti,
+        userId: payload.sub,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+      },
+    });
+  }
+
   async getCurrentUser(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: {

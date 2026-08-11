@@ -136,6 +136,42 @@ describe('AppController (e2e)', () => {
     }
   });
 
+  it('/auth/logout (POST) revokes the refresh token session', async () => {
+    const email = `e2e-logout-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const prisma = app.get(PrismaService);
+
+    try {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const loginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasTokenPair(loginResponse.body)) {
+        throw new Error('Expected access and refresh tokens');
+      }
+
+      const refreshToken = loginResponse.body.refreshToken;
+
+      await request(app.getHttpServer())
+        .post('/auth/logout')
+        .send({ refreshToken })
+        .expect(204);
+
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken })
+        .expect(401);
+    } finally {
+      await prisma.user.deleteMany({ where: { email } });
+    }
+  });
+
   afterEach(async () => {
     await app.close();
   });
