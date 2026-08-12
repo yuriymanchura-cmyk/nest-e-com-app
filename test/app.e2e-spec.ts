@@ -172,6 +172,52 @@ describe('AppController (e2e)', () => {
     }
   });
 
+  it('/auth/password (PATCH) changes password and revokes refresh sessions', async () => {
+    const email = `e2e-password-${randomUUID()}@example.com`;
+    const currentPassword = 'secure-password-123';
+    const newPassword = 'new-secure-password-123';
+    const prisma = app.get(PrismaService);
+
+    try {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password: currentPassword })
+        .expect(201);
+
+      const loginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password: currentPassword })
+        .expect(200);
+
+      if (!hasTokenPair(loginResponse.body)) {
+        throw new Error('Expected access and refresh tokens');
+      }
+
+      await request(app.getHttpServer())
+        .patch('/auth/password')
+        .set('Authorization', `Bearer ${loginResponse.body.accessToken}`)
+        .send({ currentPassword, newPassword })
+        .expect(204);
+
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password: currentPassword })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: loginResponse.body.refreshToken })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password: newPassword })
+        .expect(200);
+    } finally {
+      await prisma.user.deleteMany({ where: { email } });
+    }
+  });
+
   afterEach(async () => {
     await app.close();
   });

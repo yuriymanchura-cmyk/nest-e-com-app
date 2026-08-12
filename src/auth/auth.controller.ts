@@ -7,6 +7,7 @@ import {
   UseGuards,
   Get,
   Req,
+  Patch,
 } from '@nestjs/common';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -16,6 +17,7 @@ import {
   JwtAuthGuard,
   type AuthenticatedRequest,
 } from './jwt-auth/jwt-auth.guard';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -42,6 +44,16 @@ export class AuthController {
   @Post('logout')
   logout(@Body() dto: RefreshTokenDto): Promise<void> {
     return this.authService.logout(dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Patch('password')
+  changePassword(
+    @Req() request: AuthenticatedRequest,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<void> {
+    return this.authService.changePassword(request.user!.sub, dto);
   }
 
   @UseGuards(JwtAuthGuard)
