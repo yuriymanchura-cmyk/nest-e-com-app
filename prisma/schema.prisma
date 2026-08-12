@@ -40,3 +40,11 @@ model RefreshToken {
 
   @@index([userId])
 }
+
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @unique
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -5,6 +5,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
+import { Role } from '../src/generated/prisma/enums';
 
 function hasAccessToken(value: unknown): value is { accessToken: string } {
   return (
@@ -214,6 +215,61 @@ describe('AppController (e2e)', () => {
         .send({ email, password: newPassword })
         .expect(200);
     } finally {
+      await prisma.user.deleteMany({ where: { email } });
+    }
+  });
+
+  it('/categories (POST) allows only admins to create a category', async () => {
+    const email = `e2e-category-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const slug = `category-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const customerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(customerLoginResponse.body)) {
+        throw new Error('Expected an access token');
+      }
+
+      await request(app.getHttpServer())
+        .post('/categories')
+        .set(
+          'Authorization',
+          `Bearer ${customerLoginResponse.body.accessToken}`,
+        )
+        .send({ name: 'E2E Category', slug })
+        .expect(403);
+
+      await prisma.user.update({
+        where: { email },
+        data: { role: Role.ADMIN },
+      });
+
+      const adminLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(adminLoginResponse.body)) {
+        throw new Error('Expected an admin access token');
+      }
+
+      await request(app.getHttpServer())
+        .post('/categories')
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ name: 'E2E Category', slug })
+        .expect(201);
+    } finally {
+      await prisma.category.deleteMany({ where: { slug } });
       await prisma.user.deleteMany({ where: { email } });
     }
   });
