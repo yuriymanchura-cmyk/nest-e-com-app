@@ -268,6 +268,8 @@ describe('AppController (e2e)', () => {
         .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
         .send({ name: 'E2E Category', slug })
         .expect(201);
+
+      await request(app.getHttpServer()).get('/categories').expect(200);
     } finally {
       await prisma.category.deleteMany({ where: { slug } });
       await prisma.user.deleteMany({ where: { email } });

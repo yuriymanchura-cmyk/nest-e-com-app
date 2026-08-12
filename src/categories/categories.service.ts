@@ -26,4 +26,17 @@ export class CategoriesService {
       throw error;
     }
   }
+
+  async findAll() {
+    return this.prisma.category.findMany({
+      orderBy: {
+        name: 'asc',
+      },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+      },
+    });
+  }
 }
