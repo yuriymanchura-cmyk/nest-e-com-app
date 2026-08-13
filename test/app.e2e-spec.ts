@@ -276,6 +276,88 @@ describe('AppController (e2e)', () => {
     }
   });
 
+  it('/products (POST) allows only admins to create a product', async () => {
+    const email = `e2e-product-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-category-${randomUUID()}`;
+    const productSlug = `e2e-product-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const customerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(customerLoginResponse.body)) {
+        throw new Error('Expected a customer access token');
+      }
+
+      const productDto = {
+        name: 'E2E Product',
+        slug: productSlug,
+        description: 'Product created by an e2e test.',
+        price: '99.99',
+        stock: 10,
+        categoryId: category.id,
+      };
+
+      await request(app.getHttpServer())
+        .post('/products')
+        .set(
+          'Authorization',
+          `Bearer ${customerLoginResponse.body.accessToken}`,
+        )
+        .send(productDto)
+        .expect(403);
+
+      await prisma.user.update({
+        where: { email },
+        data: { role: Role.ADMIN },
+      });
+
+      const adminLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(adminLoginResponse.body)) {
+        throw new Error('Expected an admin access token');
+      }
+
+      const createResponse = await request(app.getHttpServer())
+        .post('/products')
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send(productDto)
+        .expect(201);
+
+      expect(createResponse.body).toMatchObject({
+        name: productDto.name,
+        slug: productDto.slug,
+        price: productDto.price,
+        stock: productDto.stock,
+        isActive: true,
+        categoryId: category.id,
+      });
+    } finally {
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+      await prisma.user.deleteMany({ where: { email } });
+    }
+  });
+
   afterEach(async () => {
     await app.close();
   });
