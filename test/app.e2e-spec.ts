@@ -351,6 +351,25 @@ describe('AppController (e2e)', () => {
         isActive: true,
         categoryId: category.id,
       });
+
+      const productsResponse = await request(app.getHttpServer())
+        .get('/products')
+        .expect(200);
+
+      expect(productsResponse.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: productDto.name,
+            slug: productDto.slug,
+            price: productDto.price,
+            category: {
+              id: category.id,
+              name: category.name,
+              slug: category.slug,
+            },
+          }),
+        ]),
+      );
     } finally {
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
