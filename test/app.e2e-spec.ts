@@ -29,6 +29,15 @@ function hasTokenPair(
   );
 }
 
+function hasId(value: unknown): value is { id: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    typeof value.id === 'string'
+  );
+}
+
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
@@ -343,6 +352,10 @@ describe('AppController (e2e)', () => {
         .send(productDto)
         .expect(201);
 
+      if (!hasId(createResponse.body)) {
+        throw new Error('Expected created product id');
+      }
+
       expect(createResponse.body).toMatchObject({
         name: productDto.name,
         slug: productDto.slug,
@@ -351,6 +364,32 @@ describe('AppController (e2e)', () => {
         isActive: true,
         categoryId: category.id,
       });
+
+      await request(app.getHttpServer())
+        .patch(`/products/${createResponse.body.id}`)
+        .set(
+          'Authorization',
+          `Bearer ${customerLoginResponse.body.accessToken}`,
+        )
+        .send({ stock: 0 })
+        .expect(403);
+
+      const updateResponse = await request(app.getHttpServer())
+        .patch(`/products/${createResponse.body.id}`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ stock: 7 })
+        .expect(200);
+
+      expect(updateResponse.body).toMatchObject({
+        id: createResponse.body.id,
+        stock: 7,
+      });
+
+      await request(app.getHttpServer())
+        .patch(`/products/${createResponse.body.id}`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({})
+        .expect(400);
 
       const productsResponse = await request(app.getHttpServer())
         .get('/products')
@@ -387,6 +426,21 @@ describe('AppController (e2e)', () => {
       });
       expect(productResponse.body).not.toHaveProperty('stock');
       expect(productResponse.body).not.toHaveProperty('isActive');
+
+      const deactivateResponse = await request(app.getHttpServer())
+        .patch(`/products/${createResponse.body.id}`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ isActive: false })
+        .expect(200);
+
+      expect(deactivateResponse.body).toMatchObject({
+        id: createResponse.body.id,
+        isActive: false,
+      });
+
+      await request(app.getHttpServer())
+        .get(`/products/${productDto.slug}`)
+        .expect(404);
 
       await request(app.getHttpServer())
         .get('/products/does-not-exist')
