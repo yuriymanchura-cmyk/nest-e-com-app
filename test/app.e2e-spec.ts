@@ -276,7 +276,7 @@ describe('AppController (e2e)', () => {
     }
   });
 
-  it('/products (POST) allows only admins to create a product', async () => {
+  it('/products supports admin creation and public listing/detail', async () => {
     const email = `e2e-product-${randomUUID()}@example.com`;
     const password = 'secure-password-123';
     const categorySlug = `e2e-category-${randomUUID()}`;
@@ -370,6 +370,27 @@ describe('AppController (e2e)', () => {
           }),
         ]),
       );
+
+      const productResponse = await request(app.getHttpServer())
+        .get(`/products/${productDto.slug}`)
+        .expect(200);
+
+      expect(productResponse.body).toMatchObject({
+        name: productDto.name,
+        slug: productDto.slug,
+        price: productDto.price,
+        category: {
+          id: category.id,
+          name: category.name,
+          slug: category.slug,
+        },
+      });
+      expect(productResponse.body).not.toHaveProperty('stock');
+      expect(productResponse.body).not.toHaveProperty('isActive');
+
+      await request(app.getHttpServer())
+        .get('/products/does-not-exist')
+        .expect(404);
     } finally {
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
