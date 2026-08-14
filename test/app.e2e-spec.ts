@@ -38,6 +38,24 @@ function hasId(value: unknown): value is { id: string } {
   );
 }
 
+function hasCart(value: unknown): value is {
+  id: string | null;
+  items: Array<{
+    id: string;
+    quantity: number;
+    product: { id: string; name: string; slug: string; price: string };
+  }>;
+} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    (typeof value.id === 'string' || value.id === null) &&
+    'items' in value &&
+    Array.isArray(value.items)
+  );
+}
+
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
@@ -449,6 +467,136 @@ describe('AppController (e2e)', () => {
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
       await prisma.user.deleteMany({ where: { email } });
+    }
+  });
+
+  it('/cart supports an authenticated item lifecycle', async () => {
+    const email = `e2e-cart-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-cart-category-${randomUUID()}`;
+    const productSlug = `e2e-cart-product-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Cart Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Cart Product',
+          slug: productSlug,
+          description: 'Product used by the cart e2e test.',
+          price: '99.99',
+          stock: 10,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const loginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(loginResponse.body)) {
+        throw new Error('Expected a cart user access token');
+      }
+
+      const authorization = `Bearer ${loginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer()).get('/cart').expect(401);
+
+      const addResponse = await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', authorization)
+        .send({ productId: product.id, quantity: 2 })
+        .expect(201);
+
+      if (!hasCart(addResponse.body) || addResponse.body.items.length !== 1) {
+        throw new Error('Expected one item in the cart');
+      }
+
+      const itemId = addResponse.body.items[0].id;
+      expect(addResponse.body.items[0]).toMatchObject({
+        quantity: 2,
+        product: {
+          id: product.id,
+          name: product.name,
+          slug: product.slug,
+          price: '99.99',
+        },
+      });
+
+      const incrementResponse = await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', authorization)
+        .send({ productId: product.id, quantity: 3 })
+        .expect(201);
+
+      if (!hasCart(incrementResponse.body)) {
+        throw new Error('Expected the cart after incrementing an item');
+      }
+
+      expect(incrementResponse.body.items).toHaveLength(1);
+      expect(incrementResponse.body.items[0]).toMatchObject({
+        id: itemId,
+        quantity: 5,
+      });
+
+      const updateResponse = await request(app.getHttpServer())
+        .patch(`/cart/items/${itemId}`)
+        .set('Authorization', authorization)
+        .send({ quantity: 4 })
+        .expect(200);
+
+      if (!hasCart(updateResponse.body)) {
+        throw new Error('Expected the cart after updating an item');
+      }
+
+      expect(updateResponse.body.items[0]).toMatchObject({
+        id: itemId,
+        quantity: 4,
+      });
+
+      const removeResponse = await request(app.getHttpServer())
+        .delete(`/cart/items/${itemId}`)
+        .set('Authorization', authorization)
+        .expect(200);
+
+      if (!hasCart(removeResponse.body)) {
+        throw new Error('Expected the cart after removing an item');
+      }
+
+      expect(removeResponse.body.items).toEqual([]);
+
+      await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', authorization)
+        .send({ productId: product.id, quantity: 1 })
+        .expect(201);
+
+      const clearResponse = await request(app.getHttpServer())
+        .delete('/cart')
+        .set('Authorization', authorization)
+        .expect(200);
+
+      if (!hasCart(clearResponse.body)) {
+        throw new Error('Expected the cart after clearing it');
+      }
+
+      expect(clearResponse.body.items).toEqual([]);
+    } finally {
+      await prisma.user.deleteMany({ where: { email } });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
     }
   });
 
