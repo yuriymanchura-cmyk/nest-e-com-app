@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import type { StringValue } from 'ms';
 import { JwtModule } from '@nestjs/jwt';
-import { JwtAuthGuard } from './jwt-auth/jwt-auth.guard';
-import { PrismaModule } from '../prisma/prisma.module';
-import { AuthService } from './auth.service';
+import type { StringValue } from 'ms';
 import { AuthController } from './auth.controller';
+import { AuthService } from './auth.service';
+import { JwtAuthGuard } from './jwt-auth/jwt-auth.guard';
 import { RolesGuard } from './roles/roles.guard';
+import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
   imports: [

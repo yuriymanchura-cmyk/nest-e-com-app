@@ -1,23 +1,23 @@
 import {
   Body,
   Controller,
-  Post,
-  HttpStatus,
-  HttpCode,
-  UseGuards,
   Get,
-  Req,
+  HttpCode,
+  HttpStatus,
   Patch,
+  Post,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
-import { RegisterDto } from './dto/register.dto';
+import { AuthService } from './auth.service';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { AuthService } from './auth.service';
+import { RegisterDto } from './dto/register.dto';
 import {
-  JwtAuthGuard,
   type AuthenticatedRequest,
+  JwtAuthGuard,
 } from './jwt-auth/jwt-auth.guard';
-import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Controller('auth')
 export class AuthController {

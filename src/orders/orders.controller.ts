@@ -15,11 +15,11 @@ import {
   type AuthenticatedRequest,
   JwtAuthGuard,
 } from '../auth/jwt-auth/jwt-auth.guard';
-import { OrdersService } from './orders.service';
-import { RolesGuard } from '../auth/roles/roles.guard';
 import { Roles } from '../auth/roles/roles.decorator';
+import { RolesGuard } from '../auth/roles/roles.guard';
 import { Role } from '../generated/prisma/enums';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { OrdersService } from './orders.service';
 
 @Controller('orders')
 export class OrdersController {

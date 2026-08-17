@@ -8,11 +8,11 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { ProductsService } from './products.service';
-import { Roles } from '../auth/roles/roles.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth/jwt-auth.guard';
+import { Roles } from '../auth/roles/roles.decorator';
 import { RolesGuard } from '../auth/roles/roles.guard';
 import { Role } from '../generated/prisma/enums';
+import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 

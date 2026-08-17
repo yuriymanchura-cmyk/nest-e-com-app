@@ -4,8 +4,8 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
 import { OrderStatus, Prisma } from '../generated/prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { isUUID } from 'class-validator';
 

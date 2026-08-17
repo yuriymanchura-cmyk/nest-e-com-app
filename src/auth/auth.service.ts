@@ -1,6 +1,4 @@
-import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
-import type { StringValue } from 'ms';
 import * as argon2 from 'argon2';
 import {
   ConflictException,
@@ -8,13 +6,15 @@ import {
   InternalServerErrorException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { RegisterDto } from './dto/register.dto';
+import type { StringValue } from 'ms';
 import { Prisma } from '../generated/prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { ChangePasswordDto } from './dto/change-password.dto';
+import { RegisterDto } from './dto/register.dto';
 
 interface RefreshTokenPayload {
   sub: string;
