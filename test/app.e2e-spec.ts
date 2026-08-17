@@ -600,6 +600,568 @@ describe('AppController (e2e)', () => {
     }
   });
 
+  it('/orders/checkout (POST) creates an order, decrements stock, and clears the cart', async () => {
+    const email = `e2e-order-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-order-category-${randomUUID()}`;
+    const productSlug = `e2e-order-product-${randomUUID()}`;
+    const idempotencyKey = randomUUID();
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Order Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Order Product',
+          slug: productSlug,
+          description: 'Product used by the checkout e2e test.',
+          price: '49.99',
+          stock: 5,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const loginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(loginResponse.body)) {
+        throw new Error('Expected an order user access token');
+      }
+
+      const authorization = `Bearer ${loginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', authorization)
+        .send({ productId: product.id, quantity: 2 })
+        .expect(201);
+
+      const checkoutResponse = await request(app.getHttpServer())
+        .post('/orders/checkout')
+        .set('Authorization', authorization)
+        .set('Idempotency-Key', idempotencyKey)
+        .expect(201);
+
+      if (!hasId(checkoutResponse.body)) {
+        throw new Error('Expected created order id');
+      }
+
+      expect(checkoutResponse.body).toMatchObject({
+        status: 'PENDING',
+        subtotal: '99.98',
+        totalAmount: '99.98',
+        items: [
+          expect.objectContaining({
+            productId: product.id,
+            productName: product.name,
+            unitPrice: '49.99',
+            quantity: 2,
+            lineTotal: '99.98',
+          }),
+        ],
+      });
+
+      const updatedProduct = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+        select: { stock: true },
+      });
+      expect(updatedProduct.stock).toBe(3);
+
+      const cartResponse = await request(app.getHttpServer())
+        .get('/cart')
+        .set('Authorization', authorization)
+        .expect(200);
+
+      if (!hasCart(cartResponse.body)) {
+        throw new Error('Expected the cart after checkout');
+      }
+
+      expect(cartResponse.body.items).toEqual([]);
+
+      const ordersResponse = await request(app.getHttpServer())
+        .get('/orders')
+        .set('Authorization', authorization)
+        .expect(200);
+
+      expect(ordersResponse.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: checkoutResponse.body.id,
+            status: 'PENDING',
+            totalAmount: '99.98',
+          }),
+        ]),
+      );
+
+      await request(app.getHttpServer())
+        .get(`/orders/${checkoutResponse.body.id}`)
+        .set('Authorization', authorization)
+        .expect(200);
+
+      const repeatedCheckoutResponse = await request(app.getHttpServer())
+        .post('/orders/checkout')
+        .set('Authorization', authorization)
+        .set('Idempotency-Key', idempotencyKey)
+        .expect(201);
+
+      expect(repeatedCheckoutResponse.body).toMatchObject({
+        id: checkoutResponse.body.id,
+        status: 'PENDING',
+      });
+
+      await request(app.getHttpServer())
+        .post('/orders/checkout')
+        .set('Authorization', authorization)
+        .set('Idempotency-Key', randomUUID())
+        .expect(400);
+    } finally {
+      await prisma.order.deleteMany({ where: { user: { email } } });
+      await prisma.user.deleteMany({ where: { email } });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+    }
+  });
+
+  it('/orders/checkout (POST) creates one order for concurrent requests with the same idempotency key', async () => {
+    const email = `e2e-idempotency-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-idempotency-category-${randomUUID()}`;
+    const productSlug = `e2e-idempotency-product-${randomUUID()}`;
+    const idempotencyKey = randomUUID();
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Idempotency Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Idempotency Product',
+          slug: productSlug,
+          description: 'Product used by the idempotency e2e test.',
+          price: '29.99',
+          stock: 5,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email, password })
+        .expect(201);
+
+      const loginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password })
+        .expect(200);
+
+      if (!hasAccessToken(loginResponse.body)) {
+        throw new Error('Expected an idempotency test access token');
+      }
+
+      const authorization = `Bearer ${loginResponse.body.accessToken}`;
+      const user = await prisma.user.findUniqueOrThrow({
+        where: { email },
+        select: { id: true },
+      });
+
+      await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', authorization)
+        .send({ productId: product.id, quantity: 1 })
+        .expect(201);
+
+      const [firstResponse, secondResponse] = await Promise.all([
+        request(app.getHttpServer())
+          .post('/orders/checkout')
+          .set('Authorization', authorization)
+          .set('Idempotency-Key', idempotencyKey),
+        request(app.getHttpServer())
+          .post('/orders/checkout')
+          .set('Authorization', authorization)
+          .set('Idempotency-Key', idempotencyKey),
+      ]);
+
+      expect(firstResponse.status).toBe(201);
+      expect(secondResponse.status).toBe(201);
+
+      if (!hasId(firstResponse.body) || !hasId(secondResponse.body)) {
+        throw new Error('Expected both checkout requests to return an order');
+      }
+
+      expect(secondResponse.body.id).toBe(firstResponse.body.id);
+
+      const [orderCount, updatedProduct] = await Promise.all([
+        prisma.order.count({ where: { userId: user.id } }),
+        prisma.product.findUniqueOrThrow({
+          where: { id: product.id },
+          select: { stock: true },
+        }),
+      ]);
+
+      expect(orderCount).toBe(1);
+      expect(updatedProduct.stock).toBe(4);
+    } finally {
+      await prisma.order.deleteMany({ where: { user: { email } } });
+      await prisma.user.deleteMany({ where: { email } });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+    }
+  });
+
+  it('/orders only exposes orders that belong to the authenticated user', async () => {
+    const ownerEmail = `e2e-order-owner-${randomUUID()}@example.com`;
+    const otherUserEmail = `e2e-order-other-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-order-access-category-${randomUUID()}`;
+    const productSlug = `e2e-order-access-product-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Order Access Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Order Access Product',
+          slug: productSlug,
+          description: 'Product used by the order ownership e2e test.',
+          price: '19.99',
+          stock: 5,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: ownerEmail, password })
+        .expect(201);
+
+      const ownerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: ownerEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(ownerLoginResponse.body)) {
+        throw new Error('Expected an order owner access token');
+      }
+
+      const ownerAuthorization = `Bearer ${ownerLoginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', ownerAuthorization)
+        .send({ productId: product.id, quantity: 1 })
+        .expect(201);
+
+      const checkoutResponse = await request(app.getHttpServer())
+        .post('/orders/checkout')
+        .set('Authorization', ownerAuthorization)
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      if (!hasId(checkoutResponse.body)) {
+        throw new Error('Expected created order id');
+      }
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: otherUserEmail, password })
+        .expect(201);
+
+      const otherUserLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: otherUserEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(otherUserLoginResponse.body)) {
+        throw new Error('Expected another user access token');
+      }
+
+      const otherUserAuthorization = `Bearer ${otherUserLoginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .get(`/orders/${checkoutResponse.body.id}`)
+        .set('Authorization', otherUserAuthorization)
+        .expect(404);
+
+      const otherUserOrdersResponse = await request(app.getHttpServer())
+        .get('/orders')
+        .set('Authorization', otherUserAuthorization)
+        .expect(200);
+
+      expect(otherUserOrdersResponse.body).toEqual([]);
+    } finally {
+      await prisma.order.deleteMany({ where: { user: { email: ownerEmail } } });
+      await prisma.user.deleteMany({
+        where: { email: { in: [ownerEmail, otherUserEmail] } },
+      });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+    }
+  });
+
+  it('/orders/:id/cancel (POST) allows the owner to cancel a pending order once and restores stock', async () => {
+    const ownerEmail = `e2e-cancel-owner-${randomUUID()}@example.com`;
+    const otherUserEmail = `e2e-cancel-other-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-cancel-category-${randomUUID()}`;
+    const productSlug = `e2e-cancel-product-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Cancel Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Cancel Product',
+          slug: productSlug,
+          description: 'Product used by the cancel order e2e test.',
+          price: '39.99',
+          stock: 5,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: ownerEmail, password })
+        .expect(201);
+
+      const ownerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: ownerEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(ownerLoginResponse.body)) {
+        throw new Error('Expected a cancel order owner access token');
+      }
+
+      const ownerAuthorization = `Bearer ${ownerLoginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', ownerAuthorization)
+        .send({ productId: product.id, quantity: 2 })
+        .expect(201);
+
+      const checkoutResponse = await request(app.getHttpServer())
+        .post('/orders/checkout')
+        .set('Authorization', ownerAuthorization)
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      if (!hasId(checkoutResponse.body)) {
+        throw new Error('Expected an order to cancel');
+      }
+
+      const orderId = checkoutResponse.body.id;
+
+      await request(app.getHttpServer())
+        .post(`/orders/${orderId}/cancel`)
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: otherUserEmail, password })
+        .expect(201);
+
+      const otherUserLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: otherUserEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(otherUserLoginResponse.body)) {
+        throw new Error('Expected another cancel order access token');
+      }
+
+      await request(app.getHttpServer())
+        .post(`/orders/${orderId}/cancel`)
+        .set(
+          'Authorization',
+          `Bearer ${otherUserLoginResponse.body.accessToken}`,
+        )
+        .expect(404);
+
+      const cancelResponse = await request(app.getHttpServer())
+        .post(`/orders/${orderId}/cancel`)
+        .set('Authorization', ownerAuthorization)
+        .expect(200);
+
+      expect(cancelResponse.body).toMatchObject({
+        id: orderId,
+        status: 'CANCELED',
+      });
+
+      const productAfterCancel = await prisma.product.findUniqueOrThrow({
+        where: { id: product.id },
+        select: { stock: true },
+      });
+      expect(productAfterCancel.stock).toBe(5);
+
+      await request(app.getHttpServer())
+        .post(`/orders/${orderId}/cancel`)
+        .set('Authorization', ownerAuthorization)
+        .expect(400);
+
+      const productAfterRepeatedCancel = await prisma.product.findUniqueOrThrow(
+        {
+          where: { id: product.id },
+          select: { stock: true },
+        },
+      );
+      expect(productAfterRepeatedCancel.stock).toBe(5);
+    } finally {
+      await prisma.order.deleteMany({ where: { user: { email: ownerEmail } } });
+      await prisma.user.deleteMany({
+        where: { email: { in: [ownerEmail, otherUserEmail] } },
+      });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+    }
+  });
+
+  it('/orders/:id/status (PATCH) allows only admins to make valid status transitions', async () => {
+    const adminEmail = `e2e-order-admin-${randomUUID()}@example.com`;
+    const customerEmail = `e2e-order-customer-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const prisma = app.get(PrismaService);
+
+    try {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: adminEmail, password })
+        .expect(201);
+
+      const admin = await prisma.user.update({
+        where: { email: adminEmail },
+        data: { role: Role.ADMIN },
+        select: { id: true },
+      });
+
+      const order = await prisma.order.create({
+        data: {
+          userId: admin.id,
+          subtotal: '10.00',
+          totalAmount: '10.00',
+        },
+        select: { id: true },
+      });
+
+      const adminLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: adminEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(adminLoginResponse.body)) {
+        throw new Error('Expected an admin access token');
+      }
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: customerEmail, password })
+        .expect(201);
+
+      const customerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: customerEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(customerLoginResponse.body)) {
+        throw new Error('Expected a customer access token');
+      }
+
+      await request(app.getHttpServer())
+        .get('/orders/admin')
+        .set(
+          'Authorization',
+          `Bearer ${customerLoginResponse.body.accessToken}`,
+        )
+        .expect(403);
+
+      const adminOrdersResponse = await request(app.getHttpServer())
+        .get('/orders/admin')
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .expect(200);
+
+      expect(adminOrdersResponse.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: order.id,
+            status: 'PENDING',
+            user: {
+              id: admin.id,
+              email: adminEmail,
+            },
+          }),
+        ]),
+      );
+
+      await request(app.getHttpServer())
+        .patch(`/orders/${order.id}/status`)
+        .set(
+          'Authorization',
+          `Bearer ${customerLoginResponse.body.accessToken}`,
+        )
+        .send({ status: 'PROCESSING' })
+        .expect(403);
+
+      const statusUpdateResponse = await request(app.getHttpServer())
+        .patch(`/orders/${order.id}/status`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ status: 'PROCESSING' })
+        .expect(200);
+
+      expect(statusUpdateResponse.body).toMatchObject({
+        id: order.id,
+        status: 'PROCESSING',
+      });
+
+      await request(app.getHttpServer())
+        .patch(`/orders/${order.id}/status`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ status: 'PENDING' })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .patch(`/orders/${order.id}/status`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ status: 'PAID' })
+        .expect(400);
+    } finally {
+      await prisma.order.deleteMany({ where: { user: { email: adminEmail } } });
+      await prisma.user.deleteMany({
+        where: { email: { in: [adminEmail, customerEmail] } },
+      });
+    }
+  });
+
   afterEach(async () => {
     await app.close();
   });

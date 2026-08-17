@@ -8,6 +8,14 @@ enum Role {
   ADMIN
 }
 
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELED
+}
+
 generator client {
   provider     = "prisma-client"
   output       = "../src/generated/prisma"
@@ -28,6 +36,7 @@ model User {
   updatedAt     DateTime       @updatedAt
   refreshTokens RefreshToken[]
   cart          Cart?
+  orders        Order[]
 }
 
 model RefreshToken {
@@ -52,18 +61,19 @@ model Category {
 }
 
 model Product {
-  id          String     @id @default(uuid()) @db.Uuid
+  id          String      @id @default(uuid()) @db.Uuid
   name        String
-  slug        String     @unique
-  description String     @db.Text
-  price       Decimal    @db.Decimal(10, 2)
-  stock       Int        @default(0)
-  isActive    Boolean    @default(true)
-  categoryId  String     @db.Uuid
-  category    Category   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  slug        String      @unique
+  description String      @db.Text
+  price       Decimal     @db.Decimal(10, 2)
+  stock       Int         @default(0)
+  isActive    Boolean     @default(true)
+  categoryId  String      @db.Uuid
+  category    Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
   cartItems   CartItem[]
+  orderItems  OrderItem[]
 
   @@index([categoryId])
 }
@@ -88,5 +98,37 @@ model CartItem {
   updatedAt DateTime @updatedAt
 
   @@unique([cartId, productId])
+  @@index([productId])
+}
+
+model Order {
+  id             String      @id @default(uuid()) @db.Uuid
+  userId         String      @db.Uuid
+  user           User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status         OrderStatus @default(PENDING)
+  subtotal       Decimal     @db.Decimal(12, 2)
+  totalAmount    Decimal     @db.Decimal(12, 2)
+  items          OrderItem[]
+  idempotencyKey String?     @unique
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id          String   @id @default(uuid()) @db.Uuid
+  orderId     String   @db.Uuid
+  productId   String   @db.Uuid
+  productName String
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  quantity    Int
+  lineTotal   Decimal  @db.Decimal(12, 2)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
   @@index([productId])
 }
