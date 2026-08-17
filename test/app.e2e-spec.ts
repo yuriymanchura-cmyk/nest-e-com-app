@@ -2,10 +2,10 @@ import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { App } from 'supertest/types';
-import { AppModule } from './../src/app.module';
-import { PrismaService } from './../src/prisma/prisma.service';
+import type { App } from 'supertest/types';
+import { AppModule } from '../src/app.module';
 import { Role } from '../src/generated/prisma/enums';
+import { PrismaService } from '../src/prisma/prisma.service';
 
 function hasAccessToken(value: unknown): value is { accessToken: string } {
   return (
