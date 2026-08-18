@@ -1162,6 +1162,211 @@ describe('AppController (e2e)', () => {
     }
   });
 
+  it('/payments supports an owner-only mock payment lifecycle', async () => {
+    const ownerEmail = `e2e-payment-owner-${randomUUID()}@example.com`;
+    const otherUserEmail = `e2e-payment-other-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-payment-category-${randomUUID()}`;
+    const productSlug = `e2e-payment-product-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Payment Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Payment Product',
+          slug: productSlug,
+          description: 'Product used by the payment e2e test.',
+          price: '59.99',
+          stock: 5,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: ownerEmail, password })
+        .expect(201);
+
+      const ownerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: ownerEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(ownerLoginResponse.body)) {
+        throw new Error('Expected a payment owner access token');
+      }
+
+      const ownerAuthorization = `Bearer ${ownerLoginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .post('/cart/items')
+        .set('Authorization', ownerAuthorization)
+        .send({ productId: product.id, quantity: 1 })
+        .expect(201);
+
+      const checkoutResponse = await request(app.getHttpServer())
+        .post('/orders/checkout')
+        .set('Authorization', ownerAuthorization)
+        .set('Idempotency-Key', randomUUID())
+        .expect(201);
+
+      if (!hasId(checkoutResponse.body)) {
+        throw new Error('Expected an order for the payment test');
+      }
+
+      const orderId = checkoutResponse.body.id;
+
+      await request(app.getHttpServer())
+        .post(`/payments/orders/${orderId}`)
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: otherUserEmail, password })
+        .expect(201);
+
+      const otherUserLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: otherUserEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(otherUserLoginResponse.body)) {
+        throw new Error('Expected another payment user access token');
+      }
+
+      await request(app.getHttpServer())
+        .post(`/payments/orders/${orderId}`)
+        .set(
+          'Authorization',
+          `Bearer ${otherUserLoginResponse.body.accessToken}`,
+        )
+        .expect(404);
+
+      const createPaymentResponse = await request(app.getHttpServer())
+        .post(`/payments/orders/${orderId}`)
+        .set('Authorization', ownerAuthorization)
+        .expect(201);
+
+      if (!hasId(createPaymentResponse.body)) {
+        throw new Error('Expected a created payment id');
+      }
+
+      const paymentId = createPaymentResponse.body.id;
+      expect(createPaymentResponse.body).toMatchObject({
+        orderId,
+        amount: '59.99',
+        status: 'PENDING',
+        provider: 'mock',
+      });
+
+      const otherUserAuthorization = `Bearer ${otherUserLoginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/confirm`)
+        .set('Authorization', otherUserAuthorization)
+        .expect(404);
+
+      await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/fail`)
+        .set('Authorization', otherUserAuthorization)
+        .expect(404);
+
+      const repeatedCreateResponse = await request(app.getHttpServer())
+        .post(`/payments/orders/${orderId}`)
+        .set('Authorization', ownerAuthorization)
+        .expect(201);
+
+      expect(repeatedCreateResponse.body).toMatchObject({
+        id: paymentId,
+        status: 'PENDING',
+      });
+
+      const failResponse = await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/fail`)
+        .set('Authorization', ownerAuthorization)
+        .expect(200);
+
+      expect(failResponse.body).toMatchObject({
+        id: paymentId,
+        status: 'FAILED',
+      });
+
+      const orderAfterFailure = await prisma.order.findUniqueOrThrow({
+        where: { id: orderId },
+        select: { status: true },
+      });
+      expect(orderAfterFailure.status).toBe('PENDING');
+
+      const repeatedFailResponse = await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/fail`)
+        .set('Authorization', ownerAuthorization)
+        .expect(200);
+
+      expect(repeatedFailResponse.body).toMatchObject({
+        id: paymentId,
+        status: 'FAILED',
+      });
+
+      const retryResponse = await request(app.getHttpServer())
+        .post(`/payments/orders/${orderId}`)
+        .set('Authorization', ownerAuthorization)
+        .expect(201);
+
+      expect(retryResponse.body).toMatchObject({
+        id: paymentId,
+        status: 'PENDING',
+      });
+
+      const confirmResponse = await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/confirm`)
+        .set('Authorization', ownerAuthorization)
+        .expect(200);
+
+      expect(confirmResponse.body).toMatchObject({
+        id: paymentId,
+        status: 'SUCCEEDED',
+      });
+
+      const repeatedConfirmResponse = await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/confirm`)
+        .set('Authorization', ownerAuthorization)
+        .expect(200);
+
+      expect(repeatedConfirmResponse.body).toMatchObject({
+        id: paymentId,
+        status: 'SUCCEEDED',
+      });
+
+      const order = await prisma.order.findUniqueOrThrow({
+        where: { id: orderId },
+        select: { status: true },
+      });
+      expect(order.status).toBe('PROCESSING');
+
+      await request(app.getHttpServer())
+        .post(`/payments/${paymentId}/fail`)
+        .set('Authorization', ownerAuthorization)
+        .expect(400);
+    } finally {
+      await prisma.payment.deleteMany({
+        where: { order: { user: { email: ownerEmail } } },
+      });
+      await prisma.order.deleteMany({ where: { user: { email: ownerEmail } } });
+      await prisma.user.deleteMany({
+        where: { email: { in: [ownerEmail, otherUserEmail] } },
+      });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+    }
+  });
+
   afterEach(async () => {
     await app.close();
   });
