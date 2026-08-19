@@ -1,5 +1,7 @@
 import {
+  Body,
   Controller,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -12,6 +14,7 @@ import {
   type AuthenticatedRequest,
   JwtAuthGuard,
 } from '../auth/jwt-auth/jwt-auth.guard';
+import { MockPaymentWebhookDto } from './dto/mock-payment-webhook.dto';
 
 @Controller('payments')
 export class PaymentsController {
@@ -44,5 +47,14 @@ export class PaymentsController {
     @Param('paymentId') paymentId: string,
   ) {
     return this.paymentService.failPayment(request.user!.sub, paymentId);
+  }
+
+  @Post('webhooks/mock')
+  @HttpCode(HttpStatus.OK)
+  handleMockWebhook(
+    @Headers('x-mock-webhook-secret') webhookSecret: string | undefined,
+    @Body() dto: MockPaymentWebhookDto,
+  ) {
+    return this.paymentService.handleMockWebhook(webhookSecret, dto);
   }
 }

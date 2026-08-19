@@ -1162,7 +1162,7 @@ describe('AppController (e2e)', () => {
     }
   });
 
-  it('/payments supports an owner-only mock payment lifecycle', async () => {
+  it('/payments supports owner-only payment creation and mock webhook lifecycle', async () => {
     const ownerEmail = `e2e-payment-owner-${randomUUID()}@example.com`;
     const otherUserEmail = `e2e-payment-other-${randomUUID()}@example.com`;
     const password = 'secure-password-123';
@@ -1266,6 +1266,14 @@ describe('AppController (e2e)', () => {
         provider: 'mock',
       });
 
+      const mockWebhookSecret = process.env['MOCK_PAYMENT_WEBHOOK_SECRET'];
+
+      if (!mockWebhookSecret) {
+        throw new Error(
+          'Expected MOCK_PAYMENT_WEBHOOK_SECRET for webhook test',
+        );
+      }
+
       const otherUserAuthorization = `Bearer ${otherUserLoginResponse.body.accessToken}`;
 
       await request(app.getHttpServer())
@@ -1276,6 +1284,29 @@ describe('AppController (e2e)', () => {
       await request(app.getHttpServer())
         .post(`/payments/${paymentId}/fail`)
         .set('Authorization', otherUserAuthorization)
+        .expect(404);
+
+      await request(app.getHttpServer())
+        .post('/payments/webhooks/mock')
+        .send({ paymentId, status: 'SUCCEEDED' })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', 'invalid-secret')
+        .send({ paymentId, status: 'SUCCEEDED' })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId, status: 'PENDING' })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId: randomUUID(), status: 'SUCCEEDED' })
         .expect(404);
 
       const repeatedCreateResponse = await request(app.getHttpServer())
@@ -1289,8 +1320,9 @@ describe('AppController (e2e)', () => {
       });
 
       const failResponse = await request(app.getHttpServer())
-        .post(`/payments/${paymentId}/fail`)
-        .set('Authorization', ownerAuthorization)
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId, status: 'FAILED' })
         .expect(200);
 
       expect(failResponse.body).toMatchObject({
@@ -1305,14 +1337,16 @@ describe('AppController (e2e)', () => {
       expect(orderAfterFailure.status).toBe('PENDING');
 
       const repeatedFailResponse = await request(app.getHttpServer())
-        .post(`/payments/${paymentId}/fail`)
-        .set('Authorization', ownerAuthorization)
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId, status: 'FAILED' })
         .expect(200);
 
       expect(repeatedFailResponse.body).toMatchObject({
         id: paymentId,
         status: 'FAILED',
       });
+      expect(repeatedFailResponse.body).toEqual(failResponse.body);
 
       const retryResponse = await request(app.getHttpServer())
         .post(`/payments/orders/${orderId}`)
@@ -1325,8 +1359,9 @@ describe('AppController (e2e)', () => {
       });
 
       const confirmResponse = await request(app.getHttpServer())
-        .post(`/payments/${paymentId}/confirm`)
-        .set('Authorization', ownerAuthorization)
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId, status: 'SUCCEEDED' })
         .expect(200);
 
       expect(confirmResponse.body).toMatchObject({
@@ -1335,14 +1370,16 @@ describe('AppController (e2e)', () => {
       });
 
       const repeatedConfirmResponse = await request(app.getHttpServer())
-        .post(`/payments/${paymentId}/confirm`)
-        .set('Authorization', ownerAuthorization)
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId, status: 'SUCCEEDED' })
         .expect(200);
 
       expect(repeatedConfirmResponse.body).toMatchObject({
         id: paymentId,
         status: 'SUCCEEDED',
       });
+      expect(repeatedConfirmResponse.body).toEqual(confirmResponse.body);
 
       const order = await prisma.order.findUniqueOrThrow({
         where: { id: orderId },
@@ -1351,8 +1388,9 @@ describe('AppController (e2e)', () => {
       expect(order.status).toBe('PROCESSING');
 
       await request(app.getHttpServer())
-        .post(`/payments/${paymentId}/fail`)
-        .set('Authorization', ownerAuthorization)
+        .post('/payments/webhooks/mock')
+        .set('x-mock-webhook-secret', mockWebhookSecret)
+        .send({ paymentId, status: 'FAILED' })
         .expect(400);
     } finally {
       await prisma.payment.deleteMany({
