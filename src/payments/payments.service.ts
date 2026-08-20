@@ -2,19 +2,158 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OrderStatus, PaymentStatus } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { MockPaymentWebhookDto } from './dto/mock-payment-webhook.dto';
+import { StripeService } from './stripe.service';
 
 @Injectable()
 export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
+    private readonly stripeService: StripeService,
   ) {}
+
+  async createStripePaymentIntent(userId: string, orderId: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId },
+      select: {
+        id: true,
+        totalAmount: true,
+        status: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    if (order.status !== OrderStatus.PENDING) {
+      throw new BadRequestException('Order is not available for payment');
+    }
+
+    const payment = await this.prisma.payment.upsert({
+      where: { orderId: order.id },
+      create: {
+        orderId: order.id,
+        amount: order.totalAmount,
+        provider: 'stripe',
+      },
+      update: {
+        provider: 'stripe',
+      },
+      select: {
+        id: true,
+        orderId: true,
+        amount: true,
+        status: true,
+        providerPaymentId: true,
+      },
+    });
+
+    if (payment.status !== PaymentStatus.PENDING) {
+      throw new BadRequestException('Payment is not available for processing');
+    }
+
+    const paymentIntent = await this.stripeService.createPaymentIntent(
+      payment.id,
+      payment.orderId,
+      payment.amount.toFixed(2),
+    );
+
+    await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        providerPaymentId: paymentIntent.id,
+      },
+    });
+
+    if (!paymentIntent.client_secret) {
+      throw new ServiceUnavailableException(
+        'Payment provider did not return a client secret',
+      );
+    }
+
+    return {
+      paymentId: payment.id,
+      amount: payment.amount,
+      currency: paymentIntent.currency,
+      clientSecret: paymentIntent.client_secret,
+    };
+  }
+
+  async handleStripeWebhook(
+    payload: Buffer | undefined,
+    signature: string | undefined,
+  ) {
+    if (!payload || !signature) {
+      throw new UnauthorizedException('Invalid Stripe webhook signature');
+    }
+
+    const event = this.verifyStripeWebhookEvent(payload, signature);
+
+    if (
+      event.type !== 'payment_intent.succeeded' &&
+      event.type !== 'payment_intent.payment_failed'
+    ) {
+      return { received: true };
+    }
+
+    const paymentIntent = event.data.object;
+
+    const payment = await this.prisma.payment.findUnique({
+      where: { providerPaymentId: paymentIntent.id },
+      select: {
+        id: true,
+        status: true,
+        orderId: true,
+      },
+    });
+
+    if (!payment) {
+      return { received: true };
+    }
+
+    const nextPaymentStatus =
+      event.type === 'payment_intent.succeeded'
+        ? PaymentStatus.SUCCEEDED
+        : PaymentStatus.FAILED;
+
+    await this.prisma.$transaction(async (tx) => {
+      const updatedPayment = await tx.payment.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: {
+          status: nextPaymentStatus,
+        },
+      });
+
+      if (updatedPayment.count === 0) {
+        return;
+      }
+
+      if (nextPaymentStatus !== PaymentStatus.SUCCEEDED) {
+        return;
+      }
+
+      const updatedOrder = await tx.order.updateMany({
+        where: { id: payment.orderId, status: OrderStatus.PENDING },
+        data: {
+          status: OrderStatus.PROCESSING,
+        },
+      });
+
+      if (updatedOrder.count !== 1) {
+        throw new BadRequestException('Order is not available for processing');
+      }
+    });
+
+    return { received: true };
+  }
 
   async createForOrder(userId: string, orderId: string) {
     const order = await this.prisma.order.findFirst({
@@ -89,6 +228,7 @@ export class PaymentsService {
     const payment = await this.prisma.payment.findFirst({
       where: {
         id: paymentId,
+        provider: 'mock',
         order: {
           userId,
         },
@@ -140,7 +280,11 @@ export class PaymentsService {
 
     return this.prisma.$transaction(async (tx) => {
       const updatedPayment = await tx.payment.updateMany({
-        where: { id: payment.id, status: PaymentStatus.PENDING },
+        where: {
+          id: payment.id,
+          status: PaymentStatus.PENDING,
+          provider: 'mock',
+        },
         data: {
           status: PaymentStatus.SUCCEEDED,
         },
@@ -153,7 +297,11 @@ export class PaymentsService {
       }
 
       const updatedOrder = await tx.order.updateMany({
-        where: { id: payment.order.id, userId, status: OrderStatus.PENDING },
+        where: {
+          id: payment.order.id,
+          userId,
+          status: OrderStatus.PENDING,
+        },
         data: {
           status: OrderStatus.PROCESSING,
         },
@@ -181,6 +329,7 @@ export class PaymentsService {
     const payment = await this.prisma.payment.findFirst({
       where: {
         id: paymentId,
+        provider: 'mock',
         order: {
           userId,
         },
@@ -203,7 +352,7 @@ export class PaymentsService {
 
     if (payment.status === PaymentStatus.FAILED) {
       return this.prisma.payment.findUniqueOrThrow({
-        where: { id: payment.id },
+        where: { id: payment.id, provider: 'mock' },
         select: {
           id: true,
           orderId: true,
@@ -231,6 +380,7 @@ export class PaymentsService {
         id: payment.id,
         status: PaymentStatus.PENDING,
         order: { status: OrderStatus.PENDING },
+        provider: 'mock',
       },
       data: {
         status: PaymentStatus.FAILED,
@@ -242,7 +392,7 @@ export class PaymentsService {
     }
 
     return this.prisma.payment.findUniqueOrThrow({
-      where: { id: payment.id },
+      where: { id: payment.id, provider: 'mock' },
       select: {
         id: true,
         orderId: true,
@@ -268,7 +418,7 @@ export class PaymentsService {
     }
 
     const payment = await this.prisma.payment.findUnique({
-      where: { id: dto.paymentId },
+      where: { id: dto.paymentId, provider: 'mock' },
       select: {
         id: true,
         status: true,
@@ -312,7 +462,11 @@ export class PaymentsService {
 
     return this.prisma.$transaction(async (tx) => {
       const updatedPayment = await tx.payment.updateMany({
-        where: { id: payment.id, status: PaymentStatus.PENDING },
+        where: {
+          id: payment.id,
+          provider: 'mock',
+          status: PaymentStatus.PENDING,
+        },
         data: { status: dto.status },
       });
 
@@ -355,6 +509,14 @@ export class PaymentsService {
 
     if (!webhookSecret || webhookSecret !== expectedSecret) {
       throw new UnauthorizedException('Invalid webhook secret');
+    }
+  }
+
+  private verifyStripeWebhookEvent(payload: Buffer, signature: string) {
+    try {
+      return this.stripeService.constructWebhookEvent(payload, signature);
+    } catch {
+      throw new UnauthorizedException('Invalid Stripe webhook signature');
     }
   }
 }

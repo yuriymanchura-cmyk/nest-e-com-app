@@ -1,3 +1,4 @@
+import type { Request } from 'express';
 import {
   Body,
   Controller,
@@ -6,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  type RawBodyRequest,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -27,6 +29,27 @@ export class PaymentsController {
     @Param('orderId') orderId: string,
   ) {
     return this.paymentService.createForOrder(request.user!.sub, orderId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('orders/:orderId/stripe-intent')
+  createStripePaymentIntent(
+    @Req() request: AuthenticatedRequest,
+    @Param('orderId') orderId: string,
+  ) {
+    return this.paymentService.createStripePaymentIntent(
+      request.user!.sub,
+      orderId,
+    );
+  }
+
+  @Post('webhooks/stripe')
+  @HttpCode(HttpStatus.OK)
+  handleStripeWebhook(
+    @Headers('stripe-signature') signature: string | undefined,
+    @Req() request: RawBodyRequest<Request>,
+  ) {
+    return this.paymentService.handleStripeWebhook(request.rawBody, signature);
   }
 
   @UseGuards(JwtAuthGuard)
