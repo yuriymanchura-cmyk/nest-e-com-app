@@ -17,6 +17,7 @@ import {
   JwtAuthGuard,
 } from '../auth/jwt-auth/jwt-auth.guard';
 import { MockPaymentWebhookDto } from './dto/mock-payment-webhook.dto';
+import { SkipThrottle } from '@nestjs/throttler';
 
 @Controller('payments')
 export class PaymentsController {
@@ -43,6 +44,7 @@ export class PaymentsController {
     );
   }
 
+  @SkipThrottle()
   @Post('webhooks/stripe')
   @HttpCode(HttpStatus.OK)
   handleStripeWebhook(
@@ -72,6 +74,7 @@ export class PaymentsController {
     return this.paymentService.failPayment(request.user!.sub, paymentId);
   }
 
+  @SkipThrottle()
   @Post('webhooks/mock')
   @HttpCode(HttpStatus.OK)
   handleMockWebhook(

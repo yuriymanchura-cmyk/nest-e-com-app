@@ -8,10 +8,41 @@ import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { RedisService } from '../redis/redis.service';
+import { ProductQueryDto, ProductSort } from './dto/product-query.dto';
+
+type PublicProduct = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  price: string;
+  category: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+};
+
+type PaginatedProducts = {
+  data: PublicProduct[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+};
+
+const ACTIVE_PRODUCTS_CACHE_TTL_SECONDS = 60;
+const ACTIVE_PRODUCTS_CATALOG_CACHE_PATTERN = 'products:active:catalog:*';
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   async create(dto: CreateProductDto) {
     const price = new Prisma.Decimal(dto.price);
@@ -32,7 +63,7 @@ export class ProductsService {
     }
 
     try {
-      return await this.prisma.product.create({
+      const product = await this.prisma.product.create({
         data: {
           name: dto.name,
           slug: dto.slug,
@@ -54,6 +85,10 @@ export class ProductsService {
           updatedAt: true,
         },
       });
+
+      await this.redis.deleteByPattern(ACTIVE_PRODUCTS_CATALOG_CACHE_PATTERN);
+
+      return product;
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -66,31 +101,121 @@ export class ProductsService {
     }
   }
 
-  async findAll() {
-    return this.prisma.product.findMany({
-      where: {
-        isActive: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        description: true,
-        price: true,
-        category: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
+  async findAll(query: ProductQueryDto): Promise<PaginatedProducts> {
+    const {
+      categorySlug,
+      search,
+      limit = 50,
+      page = 1,
+      sort = ProductSort.NEWEST,
+    } = query;
+
+    const cacheKey = this.getActiveProductsCatalogCacheKey({
+      ...query,
+      page,
+      limit,
+      sort,
+    });
+    const cachedProducts = await this.redis.get(cacheKey);
+
+    if (cachedProducts) {
+      return JSON.parse(cachedProducts) as PaginatedProducts;
+    }
+
+    const where: Prisma.ProductWhereInput = {
+      isActive: true,
+    };
+
+    if (search) {
+      where.OR = [
+        {
+          name: {
+            contains: search,
+            mode: 'insensitive',
           },
         },
-      },
+        {
+          description: {
+            contains: search,
+            mode: 'insensitive',
+          },
+        },
+      ];
+    }
+
+    if (categorySlug) {
+      where.category = {
+        slug: categorySlug,
+      };
+    }
+
+    const orderBy: Prisma.ProductOrderByWithRelationInput =
+      sort === ProductSort.PRICE_ASC
+        ? { price: 'asc' }
+        : sort === ProductSort.PRICE_DESC
+          ? { price: 'desc' }
+          : { createdAt: 'desc' };
+
+    const skip = (page - 1) * limit;
+
+    const { total, products } = await this.prisma.$transaction(async (tx) => {
+      const total = await tx.product.count({ where });
+      const products = await tx.product.findMany({
+        where,
+        orderBy,
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          description: true,
+          price: true,
+          category: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+            },
+          },
+        },
+      });
+
+      return { total, products };
     });
+
+    const data = products.map((product) => ({
+      ...product,
+      price: product.price.toString(),
+    }));
+
+    const response: PaginatedProducts = {
+      data,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+
+    await this.redis.set(
+      cacheKey,
+      JSON.stringify(response),
+      ACTIVE_PRODUCTS_CACHE_TTL_SECONDS,
+    );
+
+    return response;
   }
+
   async findOneBySlug(slug: string) {
+    const cacheKey = this.getActiveProductCacheKey(slug);
+    const cachedProduct = await this.redis.get(cacheKey);
+
+    if (cachedProduct) {
+      return JSON.parse(cachedProduct) as PublicProduct;
+    }
+
     const product = await this.prisma.product.findFirst({
       where: {
         slug,
@@ -116,7 +241,18 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    return product;
+    const response: PublicProduct = {
+      ...product,
+      price: product.price.toString(),
+    };
+
+    await this.redis.set(
+      cacheKey,
+      JSON.stringify(response),
+      ACTIVE_PRODUCTS_CACHE_TTL_SECONDS,
+    );
+
+    return response;
   }
   async update(id: string, dto: UpdateProductDto) {
     const data: Prisma.ProductUpdateInput = {};
@@ -180,7 +316,7 @@ export class ProductsService {
     }
 
     try {
-      return await this.prisma.product.update({
+      const updatedProduct = await this.prisma.product.update({
         where: { id },
         data,
         select: {
@@ -196,6 +332,16 @@ export class ProductsService {
           updatedAt: true,
         },
       });
+      await this.redis.deleteByPattern(ACTIVE_PRODUCTS_CATALOG_CACHE_PATTERN);
+      await this.redis.del(this.getActiveProductCacheKey(product.slug));
+
+      if (updatedProduct.slug !== product.slug) {
+        await this.redis.del(
+          this.getActiveProductCacheKey(updatedProduct.slug),
+        );
+      }
+
+      return updatedProduct;
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -205,5 +351,24 @@ export class ProductsService {
       }
       throw error;
     }
+  }
+  private getActiveProductCacheKey(slug: string): string {
+    return `products:active:slug:${slug}:v1`;
+  }
+
+  private getActiveProductsCatalogCacheKey(query: ProductQueryDto): string {
+    const { page, limit, sort, search, categorySlug } = query;
+
+    return [
+      'products',
+      'active',
+      'catalog',
+      `page:${page}`,
+      `limit:${limit}`,
+      `sort:${sort}`,
+      `search:${encodeURIComponent(search ?? '')}`,
+      `category:${encodeURIComponent(categorySlug ?? '')}`,
+      'v1',
+    ].join(':');
   }
 }

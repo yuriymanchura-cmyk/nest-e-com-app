@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -6,6 +6,7 @@ import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { Role } from '../src/generated/prisma/enums';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { RedisService } from '../src/redis/redis.service';
 
 function hasAccessToken(value: unknown): value is { accessToken: string } {
   return (
@@ -56,6 +57,34 @@ function hasCart(value: unknown): value is {
   );
 }
 
+function hasPaginatedProducts(value: unknown): value is {
+  data: unknown[];
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'data' in value &&
+    Array.isArray(value.data) &&
+    'meta' in value &&
+    typeof value.meta === 'object' &&
+    value.meta !== null &&
+    'page' in value.meta &&
+    typeof value.meta.page === 'number' &&
+    'limit' in value.meta &&
+    typeof value.meta.limit === 'number' &&
+    'total' in value.meta &&
+    typeof value.meta.total === 'number' &&
+    'totalPages' in value.meta &&
+    typeof value.meta.totalPages === 'number'
+  );
+}
+
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
@@ -65,7 +94,18 @@ describe('AppController (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
     await app.init();
+
+    const redisService = app.get(RedisService);
+
+    await redisService.deleteByPattern('throttle:*');
   });
 
   it('/ (GET)', () => {
@@ -109,6 +149,20 @@ describe('AppController (e2e)', () => {
     } finally {
       await prisma.user.deleteMany({ where: { email } });
     }
+  });
+
+  it('/auth/login (POST) limits repeated requests', async () => {
+    const login = () =>
+      request(app.getHttpServer()).post('/auth/login').send({
+        email: 'rate-limit@example.com',
+        password: 'wrong-password-123',
+      });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await login().expect(401);
+    }
+
+    await login().expect(429);
   });
 
   it('/auth/me (GET) rejects unauthenticated requests', () => {
@@ -383,6 +437,17 @@ describe('AppController (e2e)', () => {
         categoryId: category.id,
       });
 
+      await request(app.getHttpServer()).get('/products').expect(200);
+
+      const cachedProductResponse = await request(app.getHttpServer())
+        .get(`/products/${productDto.slug}`)
+        .expect(200);
+
+      expect(cachedProductResponse.body).toMatchObject({
+        id: createResponse.body.id,
+        price: productDto.price,
+      });
+
       await request(app.getHttpServer())
         .patch(`/products/${createResponse.body.id}`)
         .set(
@@ -395,11 +460,12 @@ describe('AppController (e2e)', () => {
       const updateResponse = await request(app.getHttpServer())
         .patch(`/products/${createResponse.body.id}`)
         .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
-        .send({ stock: 7 })
+        .send({ price: '79.99', stock: 7 })
         .expect(200);
 
       expect(updateResponse.body).toMatchObject({
         id: createResponse.body.id,
+        price: '79.99',
         stock: 7,
       });
 
@@ -410,23 +476,41 @@ describe('AppController (e2e)', () => {
         .expect(400);
 
       const productsResponse = await request(app.getHttpServer())
-        .get('/products')
+        .get(
+          `/products?search=${encodeURIComponent(productDto.name)}&categorySlug=${categorySlug}&sort=priceAsc&page=1&limit=1`,
+        )
         .expect(200);
 
-      expect(productsResponse.body).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
+      if (!hasPaginatedProducts(productsResponse.body)) {
+        throw new Error('Expected paginated products response');
+      }
+
+      expect(productsResponse.body).toMatchObject({
+        data: [
+          {
             name: productDto.name,
             slug: productDto.slug,
-            price: productDto.price,
+            price: '79.99',
             category: {
               id: category.id,
               name: category.name,
               slug: category.slug,
             },
-          }),
-        ]),
-      );
+          },
+        ],
+        meta: {
+          page: 1,
+          limit: 1,
+        },
+      });
+      expect(productsResponse.body.meta.total).toBeGreaterThanOrEqual(1);
+      expect(productsResponse.body.meta.totalPages).toBeGreaterThanOrEqual(1);
+
+      await request(app.getHttpServer()).get('/products?page=0').expect(400);
+      await request(app.getHttpServer()).get('/products?limit=51').expect(400);
+      await request(app.getHttpServer())
+        .get('/products?sort=invalid')
+        .expect(400);
 
       const productResponse = await request(app.getHttpServer())
         .get(`/products/${productDto.slug}`)
@@ -435,7 +519,7 @@ describe('AppController (e2e)', () => {
       expect(productResponse.body).toMatchObject({
         name: productDto.name,
         slug: productDto.slug,
-        price: productDto.price,
+        price: '79.99',
         category: {
           id: category.id,
           name: category.name,
