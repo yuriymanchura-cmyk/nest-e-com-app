@@ -13,6 +13,7 @@ import { ProductsModule } from './products/products.module';
 import { PaymentsModule } from './payments/payments.module';
 import { RedisModule } from './redis/redis.module';
 import { RedisThrottlerStorage } from './redis/redis-throttler.storage';
+import { envValidationSchema } from './config/env.validation';
 
 @Module({
   imports: [
@@ -21,6 +22,10 @@ import { RedisThrottlerStorage } from './redis/redis-throttler.storage';
       isGlobal: true,
       envFilePath:
         process.env.NODE_ENV === 'test' ? ['.env.test', '.env'] : '.env',
+      validationSchema: envValidationSchema,
+      validationOptions: {
+        abortEarly: false,
+      },
     }),
     AuthModule,
     CategoriesModule,
