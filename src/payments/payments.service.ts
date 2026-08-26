@@ -5,7 +5,13 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import type { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
+import {
+  ORDER_PAID_JOB,
+  type OrderPaidJobData,
+} from '../orders/jobs/order-paid.job';
 import { OrderStatus, PaymentStatus } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { MockPaymentWebhookDto } from './dto/mock-payment-webhook.dto';
@@ -17,6 +23,9 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly stripeService: StripeService,
+
+    @InjectQueue('orders')
+    private readonly ordersQueue: Queue<OrderPaidJobData>,
   ) {}
 
   async createStripePaymentIntent(userId: string, orderId: string) {
@@ -124,33 +133,59 @@ export class PaymentsService {
         ? PaymentStatus.SUCCEEDED
         : PaymentStatus.FAILED;
 
-    await this.prisma.$transaction(async (tx) => {
-      const updatedPayment = await tx.payment.updateMany({
-        where: { id: payment.id, status: PaymentStatus.PENDING },
-        data: {
-          status: nextPaymentStatus,
+    const shouldEnqueueOrderPaidJob = await this.prisma.$transaction(
+      async (tx) => {
+        const updatedPayment = await tx.payment.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: {
+            status: nextPaymentStatus,
+          },
+        });
+
+        if (updatedPayment.count !== 1) {
+          return (
+            nextPaymentStatus === PaymentStatus.SUCCEEDED &&
+            payment.status === PaymentStatus.SUCCEEDED
+          );
+        }
+
+        if (nextPaymentStatus !== PaymentStatus.SUCCEEDED) {
+          return false;
+        }
+
+        const updatedOrder = await tx.order.updateMany({
+          where: { id: payment.orderId, status: OrderStatus.PENDING },
+          data: {
+            status: OrderStatus.PROCESSING,
+          },
+        });
+
+        if (updatedOrder.count !== 1) {
+          throw new BadRequestException(
+            'Order is not available for processing',
+          );
+        }
+        return true;
+      },
+    );
+
+    if (shouldEnqueueOrderPaidJob) {
+      await this.ordersQueue.add(
+        ORDER_PAID_JOB,
+        {
+          orderId: payment.orderId,
+          paymentId: payment.id,
         },
-      });
-
-      if (updatedPayment.count === 0) {
-        return;
-      }
-
-      if (nextPaymentStatus !== PaymentStatus.SUCCEEDED) {
-        return;
-      }
-
-      const updatedOrder = await tx.order.updateMany({
-        where: { id: payment.orderId, status: OrderStatus.PENDING },
-        data: {
-          status: OrderStatus.PROCESSING,
+        {
+          jobId: `order-paid-${payment.id}`,
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 1000,
+          },
         },
-      });
-
-      if (updatedOrder.count !== 1) {
-        throw new BadRequestException('Order is not available for processing');
-      }
-    });
+      );
+    }
 
     return { received: true };
   }

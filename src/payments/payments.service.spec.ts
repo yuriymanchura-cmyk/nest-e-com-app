@@ -1,5 +1,7 @@
 import { ConfigService } from '@nestjs/config';
+import { getQueueToken } from '@nestjs/bullmq';
 import { Test, TestingModule } from '@nestjs/testing';
+import { ORDER_PAID_JOB } from '../orders/jobs/order-paid.job';
 import { OrderStatus, PaymentStatus } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { PaymentsService } from './payments.service';
@@ -39,6 +41,10 @@ describe('PaymentsService', () => {
     constructWebhookEvent: jest.fn(),
   };
 
+  const ordersQueue = {
+    add: jest.fn(),
+  };
+
   beforeEach(async () => {
     jest.resetAllMocks();
 
@@ -60,6 +66,10 @@ describe('PaymentsService', () => {
         {
           provide: StripeService,
           useValue: stripeService,
+        },
+        {
+          provide: getQueueToken('orders'),
+          useValue: ordersQueue,
         },
       ],
     }).compile();
@@ -109,6 +119,21 @@ describe('PaymentsService', () => {
       },
       data: { status: OrderStatus.PROCESSING },
     });
+    expect(ordersQueue.add).toHaveBeenCalledWith(
+      ORDER_PAID_JOB,
+      {
+        orderId: 'order-id',
+        paymentId: 'payment-id',
+      },
+      {
+        jobId: 'order-paid-payment-id',
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 1000,
+        },
+      },
+    );
   });
 
   it('marks a pending Stripe payment as failed without starting its order', async () => {
@@ -138,16 +163,17 @@ describe('PaymentsService', () => {
       data: { status: PaymentStatus.FAILED },
     });
     expect(transactionClient.order.updateMany).not.toHaveBeenCalled();
+    expect(ordersQueue.add).not.toHaveBeenCalled();
   });
 
-  it('does not process a duplicate Stripe success webhook', async () => {
+  it('re-enqueues an idempotent job for a replayed Stripe success webhook', async () => {
     stripeService.constructWebhookEvent.mockReturnValue({
       type: 'payment_intent.succeeded',
       data: { object: { id: 'pi_duplicate' } },
     });
     prismaService.payment.findUnique.mockResolvedValue({
       id: 'payment-id',
-      status: PaymentStatus.PENDING,
+      status: PaymentStatus.SUCCEEDED,
       orderId: 'order-id',
     });
     transactionClient.payment.updateMany.mockResolvedValue({ count: 0 });
@@ -160,5 +186,20 @@ describe('PaymentsService', () => {
     ).resolves.toEqual({ received: true });
 
     expect(transactionClient.order.updateMany).not.toHaveBeenCalled();
+    expect(ordersQueue.add).toHaveBeenCalledWith(
+      ORDER_PAID_JOB,
+      {
+        orderId: 'order-id',
+        paymentId: 'payment-id',
+      },
+      {
+        jobId: 'order-paid-payment-id',
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 1000,
+        },
+      },
+    );
   });
 });
