@@ -3,50 +3,21 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
+import { CartRepository } from './cart.repository';
 
 @Injectable()
 export class CartService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly cartRepository: CartRepository) {}
 
   async getCart(userId: string) {
-    const cart = await this.prisma.cart.findUnique({
-      where: {
-        userId,
-      },
-      select: {
-        id: true,
-        items: {
-          orderBy: { createdAt: 'asc' },
-          select: {
-            id: true,
-            quantity: true,
-            product: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
-                price: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    const cart = await this.cartRepository.findCartByUserId(userId);
     return cart ?? { id: null, items: [] };
   }
 
   async addItem(userId: string, dto: AddCartItemDto) {
-    const product = await this.prisma.product.findUnique({
-      where: { id: dto.productId },
-      select: {
-        id: true,
-        stock: true,
-        isActive: true,
-      },
-    });
+    const product = await this.cartRepository.findProductForCart(dto.productId);
 
     if (!product) {
       throw new NotFoundException('Product not found');
@@ -62,24 +33,12 @@ export class CartService {
       );
     }
 
-    const cart = await this.prisma.cart.upsert({
-      where: { userId },
-      create: { userId },
-      update: {},
-      select: { id: true },
-    });
+    const cart = await this.cartRepository.getOrCreateCart(userId);
 
-    const existingItem = await this.prisma.cartItem.findUnique({
-      where: {
-        cartId_productId: {
-          cartId: cart.id,
-          productId: product.id,
-        },
-      },
-      select: {
-        quantity: true,
-      },
-    });
+    const existingItem = await this.cartRepository.findItemQuantity(
+      cart.id,
+      product.id,
+    );
 
     const totalQuantity = (existingItem?.quantity ?? 0) + dto.quantity;
 
@@ -89,45 +48,17 @@ export class CartService {
       );
     }
 
-    await this.prisma.cartItem.upsert({
-      where: {
-        cartId_productId: {
-          cartId: cart.id,
-          productId: product.id,
-        },
-      },
-      create: {
-        cartId: cart.id,
-        productId: product.id,
-        quantity: dto.quantity,
-      },
-      update: {
-        quantity: {
-          increment: dto.quantity,
-        },
-      },
-    });
+    await this.cartRepository.addOrIncrementItem(
+      cart.id,
+      product.id,
+      dto.quantity,
+    );
 
     return this.getCart(userId);
   }
 
   async updateItem(userId: string, itemId: string, dto: UpdateCartItemDto) {
-    const item = await this.prisma.cartItem.findUnique({
-      where: { id: itemId },
-      select: {
-        cart: {
-          select: {
-            userId: true,
-          },
-        },
-        product: {
-          select: {
-            stock: true,
-            isActive: true,
-          },
-        },
-      },
-    });
+    const item = await this.cartRepository.findItemWithOwnerAndProduct(itemId);
 
     if (!item || item.cart.userId !== userId) {
       throw new NotFoundException('Cart item not found');
@@ -142,49 +73,25 @@ export class CartService {
         'Requested quantity exceeds available stock',
       );
     }
-    await this.prisma.cartItem.update({
-      where: { id: itemId },
-      data: {
-        quantity: dto.quantity,
-      },
-    });
+    await this.cartRepository.updateItemQuantity(itemId, dto.quantity);
 
     return this.getCart(userId);
   }
 
   async removeItem(userId: string, itemId: string) {
-    const item = await this.prisma.cartItem.findUnique({
-      where: { id: itemId },
-      select: {
-        cart: {
-          select: {
-            userId: true,
-          },
-        },
-      },
-    });
+    const item = await this.cartRepository.findItemWithOwner(itemId);
 
     if (!item || item.cart.userId !== userId) {
       throw new NotFoundException('Cart item not found');
     }
 
-    await this.prisma.cartItem.delete({
-      where: {
-        id: itemId,
-      },
-    });
+    await this.cartRepository.deleteItem(itemId);
 
     return this.getCart(userId);
   }
 
   async clearCart(userId: string) {
-    await this.prisma.cartItem.deleteMany({
-      where: {
-        cart: {
-          userId,
-        },
-      },
-    });
+    await this.cartRepository.clearCart(userId);
 
     return this.getCart(userId);
   }

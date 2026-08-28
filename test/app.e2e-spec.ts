@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import type { Application } from 'express';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
@@ -94,6 +95,8 @@ describe('AppController (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    const expressApp = app.getHttpAdapter().getInstance() as Application;
+    expressApp.set('trust proxy', 1);
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -119,7 +122,7 @@ describe('AppController (e2e)', () => {
     return request(app.getHttpServer())
       .get('/health')
       .expect(200)
-      .expect({ status: 'ok' });
+      .expect({ status: 'ok', database: 'up', redis: 'up' });
   });
 
   it('/auth/login (POST)', async () => {
@@ -152,11 +155,16 @@ describe('AppController (e2e)', () => {
   });
 
   it('/auth/login (POST) limits repeated requests', async () => {
+    const rateLimitTestIp = `198.18.0.${Math.floor(Math.random() * 254) + 1}`;
+
     const login = () =>
-      request(app.getHttpServer()).post('/auth/login').send({
-        email: 'rate-limit@example.com',
-        password: 'wrong-password-123',
-      });
+      request(app.getHttpServer())
+        .post('/auth/login')
+        .set('X-Forwarded-For', rateLimitTestIp)
+        .send({
+          email: 'rate-limit@example.com',
+          password: 'wrong-password-123',
+        });
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await login().expect(401);

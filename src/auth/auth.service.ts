@@ -10,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { StringValue } from 'ms';
 import { Prisma } from '../generated/prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { AuthRepository } from './auth.repository';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -25,15 +25,13 @@ interface RefreshTokenPayload {
 @Injectable()
 export class AuthService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly authRepository: AuthRepository,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
   ) {}
 
   async findByEmail(email: string) {
-    return this.prisma.user.findUnique({
-      where: { email },
-    });
+    return this.authRepository.findUserByEmail(email);
   }
 
   async register(dto: RegisterDto) {
@@ -46,18 +44,7 @@ export class AuthService {
     const passwordHash = await argon2.hash(dto.password);
 
     try {
-      return await this.prisma.user.create({
-        data: {
-          email,
-          passwordHash,
-        },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          createdAt: true,
-        },
-      });
+      return await this.authRepository.createUser(email, passwordHash);
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -97,13 +84,11 @@ export class AuthService {
 
     const tokenHash = await argon2.hash(refreshToken);
 
-    await this.prisma.refreshToken.create({
-      data: {
-        id: tokenId,
-        userId: user.id,
-        tokenHash,
-        expiresAt,
-      },
+    await this.authRepository.createRefreshToken({
+      id: tokenId,
+      userId: user.id,
+      tokenHash,
+      expiresAt,
     });
 
     return {
@@ -175,11 +160,7 @@ export class AuthService {
     payload: RefreshTokenPayload,
     refreshToken: string,
   ) {
-    const session = await this.prisma.refreshToken.findUnique({
-      where: {
-        id: payload.jti,
-      },
-    });
+    const session = await this.authRepository.findRefreshTokenById(payload.jti);
 
     if (
       !session ||
@@ -203,14 +184,9 @@ export class AuthService {
 
     await this.getValidRefreshToken(payload, dto.refreshToken);
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
-      select: {
-        id: true,
-        role: true,
-        isActive: true,
-      },
-    });
+    const user = await this.authRepository.findActiveUserForRefresh(
+      payload.sub,
+    );
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException();
@@ -227,32 +203,15 @@ export class AuthService {
 
     const tokenHash = await argon2.hash(refreshToken);
 
-    await this.prisma.$transaction(async (tx) => {
-      const revokedSession = await tx.refreshToken.updateMany({
-        where: {
-          id: payload.jti,
-          userId: user.id,
-          revokedAt: null,
-          expiresAt: {
-            gt: new Date(),
-          },
-        },
-        data: {
-          revokedAt: new Date(),
-        },
-      });
-      if (revokedSession.count !== 1) {
-        throw new UnauthorizedException();
-      }
-      await tx.refreshToken.create({
-        data: {
-          id: tokenId,
-          userId: user.id,
-          tokenHash,
-          expiresAt,
-        },
-      });
-    });
+    const revokedSession = await this.authRepository.rotateRefreshToken(
+      payload.jti,
+      user.id,
+      { id: tokenId, tokenHash, expiresAt },
+    );
+
+    if (revokedSession.count !== 1) {
+      throw new UnauthorizedException();
+    }
 
     return {
       accessToken,
@@ -263,22 +222,11 @@ export class AuthService {
   async logout(dto: RefreshTokenDto): Promise<void> {
     const payload = await this.verifyRefreshToken(dto.refreshToken);
 
-    await this.prisma.refreshToken.updateMany({
-      where: {
-        id: payload.jti,
-        userId: payload.sub,
-        revokedAt: null,
-      },
-      data: {
-        revokedAt: new Date(),
-      },
-    });
+    await this.authRepository.revokeRefreshToken(payload.jti, payload.sub);
   }
 
   async changePassword(userId: string, dto: ChangePasswordDto): Promise<void> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const user = await this.authRepository.findUserById(userId);
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException();
@@ -295,35 +243,14 @@ export class AuthService {
 
     const passwordHash = await argon2.hash(dto.newPassword);
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.user.update({
-        where: { id: user.id },
-        data: { passwordHash },
-      });
-      await tx.refreshToken.updateMany({
-        where: {
-          userId: user.id,
-          revokedAt: null,
-        },
-        data: {
-          revokedAt: new Date(),
-        },
-      });
-    });
+    await this.authRepository.updatePasswordAndRevokeSessions(
+      user.id,
+      passwordHash,
+    );
   }
 
   async getCurrentUser(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: {
-        id: userId,
-      },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        isActive: true,
-      },
-    });
+    const user = await this.authRepository.findCurrentActiveUser(userId);
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException();

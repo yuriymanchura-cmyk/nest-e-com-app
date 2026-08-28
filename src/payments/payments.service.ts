@@ -13,14 +13,14 @@ import {
   type OrderPaidJobData,
 } from '../orders/jobs/order-paid.job';
 import { OrderStatus, PaymentStatus } from '../generated/prisma/enums';
-import { PrismaService } from '../prisma/prisma.service';
 import { MockPaymentWebhookDto } from './dto/mock-payment-webhook.dto';
+import { PaymentsRepository } from './payments.repository';
 import { StripeService } from './stripe.service';
 
 @Injectable()
 export class PaymentsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly paymentsRepository: PaymentsRepository,
     private readonly configService: ConfigService,
     private readonly stripeService: StripeService,
 
@@ -29,14 +29,7 @@ export class PaymentsService {
   ) {}
 
   async createStripePaymentIntent(userId: string, orderId: string) {
-    const order = await this.prisma.order.findFirst({
-      where: { id: orderId, userId },
-      select: {
-        id: true,
-        totalAmount: true,
-        status: true,
-      },
-    });
+    const order = await this.paymentsRepository.findOwnedOrder(orderId, userId);
 
     if (!order) {
       throw new NotFoundException('Order not found');
@@ -46,24 +39,10 @@ export class PaymentsService {
       throw new BadRequestException('Order is not available for payment');
     }
 
-    const payment = await this.prisma.payment.upsert({
-      where: { orderId: order.id },
-      create: {
-        orderId: order.id,
-        amount: order.totalAmount,
-        provider: 'stripe',
-      },
-      update: {
-        provider: 'stripe',
-      },
-      select: {
-        id: true,
-        orderId: true,
-        amount: true,
-        status: true,
-        providerPaymentId: true,
-      },
-    });
+    const payment = await this.paymentsRepository.upsertStripePayment(
+      order.id,
+      order.totalAmount,
+    );
 
     if (payment.status !== PaymentStatus.PENDING) {
       throw new BadRequestException('Payment is not available for processing');
@@ -75,12 +54,10 @@ export class PaymentsService {
       payment.amount.toFixed(2),
     );
 
-    await this.prisma.payment.update({
-      where: { id: payment.id },
-      data: {
-        providerPaymentId: paymentIntent.id,
-      },
-    });
+    await this.paymentsRepository.updateProviderPaymentId(
+      payment.id,
+      paymentIntent.id,
+    );
 
     if (!paymentIntent.client_secret) {
       throw new ServiceUnavailableException(
@@ -115,14 +92,9 @@ export class PaymentsService {
 
     const paymentIntent = event.data.object;
 
-    const payment = await this.prisma.payment.findUnique({
-      where: { providerPaymentId: paymentIntent.id },
-      select: {
-        id: true,
-        status: true,
-        orderId: true,
-      },
-    });
+    const payment = await this.paymentsRepository.findByProviderPaymentId(
+      paymentIntent.id,
+    );
 
     if (!payment) {
       return { received: true };
@@ -133,7 +105,7 @@ export class PaymentsService {
         ? PaymentStatus.SUCCEEDED
         : PaymentStatus.FAILED;
 
-    const shouldEnqueueOrderPaidJob = await this.prisma.$transaction(
+    const shouldEnqueueOrderPaidJob = await this.paymentsRepository.transaction(
       async (tx) => {
         const updatedPayment = await tx.payment.updateMany({
           where: { id: payment.id, status: PaymentStatus.PENDING },
@@ -191,14 +163,7 @@ export class PaymentsService {
   }
 
   async createForOrder(userId: string, orderId: string) {
-    const order = await this.prisma.order.findFirst({
-      where: { id: orderId, userId },
-      select: {
-        id: true,
-        totalAmount: true,
-        status: true,
-      },
-    });
+    const order = await this.paymentsRepository.findOwnedOrder(orderId, userId);
 
     if (!order) {
       throw new NotFoundException('Order not found');
@@ -208,82 +173,32 @@ export class PaymentsService {
       throw new BadRequestException('Order is not available for payment');
     }
 
-    const payment = await this.prisma.payment.upsert({
-      where: { orderId: order.id },
-      create: { orderId: order.id, amount: order.totalAmount },
-      update: {},
-      select: {
-        id: true,
-        orderId: true,
-        amount: true,
-        status: true,
-        provider: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const payment = await this.paymentsRepository.upsertMockPayment(
+      order.id,
+      order.totalAmount,
+    );
 
     if (payment.status !== PaymentStatus.FAILED) {
       return payment;
     }
 
-    const retriedPayment = await this.prisma.payment.updateMany({
-      where: {
-        id: payment.id,
-        status: PaymentStatus.FAILED,
-        order: {
-          userId,
-          status: OrderStatus.PENDING,
-        },
-      },
-      data: {
-        status: PaymentStatus.PENDING,
-      },
-    });
+    const retriedPayment = await this.paymentsRepository.retryFailedMockPayment(
+      payment.id,
+      userId,
+    );
 
     if (retriedPayment.count !== 1) {
       throw new BadRequestException('Payment is not available for retry');
     }
 
-    return this.prisma.payment.findUniqueOrThrow({
-      where: { id: payment.id },
-      select: {
-        id: true,
-        orderId: true,
-        amount: true,
-        status: true,
-        provider: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    return this.paymentsRepository.findPaymentResponse(payment.id);
   }
 
   async confirmPayment(userId: string, paymentId: string) {
-    const payment = await this.prisma.payment.findFirst({
-      where: {
-        id: paymentId,
-        provider: 'mock',
-        order: {
-          userId,
-        },
-      },
-      select: {
-        id: true,
-        status: true,
-        orderId: true,
-        amount: true,
-        provider: true,
-        createdAt: true,
-        updatedAt: true,
-        order: {
-          select: {
-            id: true,
-            status: true,
-          },
-        },
-      },
-    });
+    const payment = await this.paymentsRepository.findMockPaymentForOwner(
+      paymentId,
+      userId,
+    );
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
@@ -313,7 +228,7 @@ export class PaymentsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.paymentsRepository.transaction(async (tx) => {
       const updatedPayment = await tx.payment.updateMany({
         where: {
           id: payment.id,
@@ -361,43 +276,17 @@ export class PaymentsService {
   }
 
   async failPayment(userId: string, paymentId: string) {
-    const payment = await this.prisma.payment.findFirst({
-      where: {
-        id: paymentId,
-        provider: 'mock',
-        order: {
-          userId,
-        },
-      },
-      select: {
-        id: true,
-        status: true,
-        order: {
-          select: {
-            id: true,
-            status: true,
-          },
-        },
-      },
-    });
+    const payment = await this.paymentsRepository.findMockPaymentForOwner(
+      paymentId,
+      userId,
+    );
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
     }
 
     if (payment.status === PaymentStatus.FAILED) {
-      return this.prisma.payment.findUniqueOrThrow({
-        where: { id: payment.id, provider: 'mock' },
-        select: {
-          id: true,
-          orderId: true,
-          amount: true,
-          status: true,
-          provider: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
+      return this.paymentsRepository.findPaymentResponse(payment.id);
     }
 
     if (payment.status !== PaymentStatus.PENDING) {
@@ -410,34 +299,23 @@ export class PaymentsService {
       );
     }
 
-    const updatedPayment = await this.prisma.payment.updateMany({
-      where: {
-        id: payment.id,
-        status: PaymentStatus.PENDING,
-        order: { status: OrderStatus.PENDING },
-        provider: 'mock',
-      },
-      data: {
-        status: PaymentStatus.FAILED,
-      },
-    });
+    const updatedPayment = await this.paymentsRepository.transaction((tx) =>
+      tx.payment.updateMany({
+        where: {
+          id: payment.id,
+          status: PaymentStatus.PENDING,
+          order: { status: OrderStatus.PENDING },
+          provider: 'mock',
+        },
+        data: { status: PaymentStatus.FAILED },
+      }),
+    );
 
     if (updatedPayment.count !== 1) {
       throw new BadRequestException('Payment is not available for failure');
     }
 
-    return this.prisma.payment.findUniqueOrThrow({
-      where: { id: payment.id, provider: 'mock' },
-      select: {
-        id: true,
-        orderId: true,
-        amount: true,
-        status: true,
-        provider: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    return this.paymentsRepository.findPaymentResponse(payment.id);
   }
 
   async handleMockWebhook(
@@ -452,37 +330,16 @@ export class PaymentsService {
       );
     }
 
-    const payment = await this.prisma.payment.findUnique({
-      where: { id: dto.paymentId, provider: 'mock' },
-      select: {
-        id: true,
-        status: true,
-        order: {
-          select: {
-            id: true,
-            status: true,
-          },
-        },
-      },
-    });
+    const payment = await this.paymentsRepository.findMockPayment(
+      dto.paymentId,
+    );
 
     if (!payment) {
       throw new NotFoundException('Payment not found');
     }
 
     if (payment.status === dto.status) {
-      return this.prisma.payment.findUniqueOrThrow({
-        where: { id: payment.id },
-        select: {
-          id: true,
-          orderId: true,
-          amount: true,
-          status: true,
-          provider: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
+      return this.paymentsRepository.findPaymentResponse(payment.id);
     }
 
     if (payment.status !== PaymentStatus.PENDING) {
@@ -495,7 +352,7 @@ export class PaymentsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.paymentsRepository.transaction(async (tx) => {
       const updatedPayment = await tx.payment.updateMany({
         where: {
           id: payment.id,

@@ -5,7 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { OrderStatus, Prisma } from '../generated/prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { OrdersRepository } from './orders.repository';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { isUUID } from 'class-validator';
 
@@ -29,7 +29,7 @@ export class OrdersService {
     },
   };
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly ordersRepository: OrdersRepository) {}
 
   async checkout(userId: string, idempotencyKey: string) {
     if (!isUUID(idempotencyKey, '4')) {
@@ -37,7 +37,7 @@ export class OrdersService {
     }
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      return await this.ordersRepository.transaction(async (tx) => {
         const user = await tx.user.findUnique({
           where: { id: userId },
           select: {
@@ -155,10 +155,11 @@ export class OrdersService {
         return order;
       });
     } catch (error: unknown) {
-      const existingOrder = await this.prisma.order.findFirst({
-        where: { userId, idempotencyKey },
-        select: this.orderDetailsSelect,
-      });
+      const existingOrder =
+        await this.ordersRepository.findByUserAndIdempotency(
+          userId,
+          idempotencyKey,
+        );
 
       if (existingOrder) {
         return existingOrder;
@@ -169,19 +170,10 @@ export class OrdersService {
   }
 
   async cancel(userId: string, orderId: string) {
-    const order = await this.prisma.order.findFirst({
-      where: { id: orderId, userId },
-      select: {
-        id: true,
-        status: true,
-        items: {
-          select: {
-            productId: true,
-            quantity: true,
-          },
-        },
-      },
-    });
+    const order = await this.ordersRepository.findCancelableOrder(
+      userId,
+      orderId,
+    );
 
     if (!order) {
       throw new NotFoundException('Order not found');
@@ -191,7 +183,7 @@ export class OrdersService {
       throw new BadRequestException('Order cannot be canceled');
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.ordersRepository.transaction(async (tx) => {
       const updatedOrder = await tx.order.updateMany({
         where: { id: order.id, userId, status: OrderStatus.PENDING },
         data: {
@@ -229,31 +221,11 @@ export class OrdersService {
   }
 
   async findMyOrders(userId: string) {
-    return this.prisma.order.findMany({
-      where: {
-        userId,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-      select: {
-        id: true,
-        status: true,
-        subtotal: true,
-        totalAmount: true,
-        createdAt: true,
-      },
-    });
+    return this.ordersRepository.findMyOrders(userId);
   }
 
   async findMyOrder(userId: string, id: string) {
-    const order = await this.prisma.order.findFirst({
-      where: {
-        id,
-        userId,
-      },
-      select: this.orderDetailsSelect,
-    });
+    const order = await this.ordersRepository.findMyOrder(userId, id);
 
     if (!order) {
       throw new NotFoundException('Order not found');
@@ -263,14 +235,7 @@ export class OrdersService {
   }
 
   async updateStatus(id: string, dto: UpdateOrderStatusDto) {
-    const order = await this.prisma.order.findUnique({
-      where: {
-        id,
-      },
-      select: {
-        status: true,
-      },
-    });
+    const order = await this.ordersRepository.findForStatusUpdate(id);
 
     if (!order) {
       throw new NotFoundException('Order not found');
@@ -288,37 +253,10 @@ export class OrdersService {
       throw new BadRequestException('Invalid order status transition');
     }
 
-    return this.prisma.order.update({
-      where: { id },
-      data: {
-        status: dto.status,
-      },
-      select: {
-        id: true,
-        status: true,
-        updatedAt: true,
-      },
-    });
+    return this.ordersRepository.updateStatus(id, dto.status);
   }
 
   async findAllForAdmin() {
-    return this.prisma.order.findMany({
-      orderBy: {
-        createdAt: 'desc',
-      },
-      select: {
-        id: true,
-        status: true,
-        subtotal: true,
-        totalAmount: true,
-        createdAt: true,
-        user: {
-          select: {
-            id: true,
-            email: true,
-          },
-        },
-      },
-    });
+    return this.ordersRepository.findAllForAdmin();
   }
 }

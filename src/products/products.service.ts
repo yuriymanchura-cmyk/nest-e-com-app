@@ -5,11 +5,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { RedisService } from '../redis/redis.service';
 import { ProductQueryDto, ProductSort } from './dto/product-query.dto';
+import { ProductsRepository } from './products.repository';
 
 type PublicProduct = {
   id: string;
@@ -40,7 +40,7 @@ const ACTIVE_PRODUCTS_CATALOG_CACHE_PATTERN = 'products:active:catalog:*';
 @Injectable()
 export class ProductsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly productsRepository: ProductsRepository,
     private readonly redis: RedisService,
   ) {}
 
@@ -53,17 +53,16 @@ export class ProductsService {
       );
     }
 
-    const category = await this.prisma.category.findUnique({
-      where: { id: dto.categoryId },
-      select: { id: true },
-    });
+    const category = await this.productsRepository.findCategoryId(
+      dto.categoryId,
+    );
 
     if (!category) {
       throw new NotFoundException('Category not found');
     }
 
     try {
-      const product = await this.prisma.product.create({
+      const product = await this.productsRepository.create({
         data: {
           name: dto.name,
           slug: dto.slug,
@@ -158,31 +157,12 @@ export class ProductsService {
 
     const skip = (page - 1) * limit;
 
-    const { total, products } = await this.prisma.$transaction(async (tx) => {
-      const total = await tx.product.count({ where });
-      const products = await tx.product.findMany({
-        where,
-        orderBy,
-        skip,
-        take: limit,
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          description: true,
-          price: true,
-          category: {
-            select: {
-              id: true,
-              name: true,
-              slug: true,
-            },
-          },
-        },
-      });
-
-      return { total, products };
-    });
+    const { total, products } = await this.productsRepository.findActiveCatalog(
+      where,
+      orderBy,
+      skip,
+      limit,
+    );
 
     const data = products.map((product) => ({
       ...product,
@@ -216,26 +196,7 @@ export class ProductsService {
       return JSON.parse(cachedProduct) as PublicProduct;
     }
 
-    const product = await this.prisma.product.findFirst({
-      where: {
-        slug,
-        isActive: true,
-      },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        description: true,
-        price: true,
-        category: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-          },
-        },
-      },
-    });
+    const product = await this.productsRepository.findActiveBySlug(slug);
 
     if (!product) {
       throw new NotFoundException('Product not found');
@@ -256,9 +217,7 @@ export class ProductsService {
   }
   async update(id: string, dto: UpdateProductDto) {
     const data: Prisma.ProductUpdateInput = {};
-    const product = await this.prisma.product.findUnique({
-      where: { id },
-    });
+    const product = await this.productsRepository.findById(id);
 
     if (!product) {
       throw new NotFoundException('Product not found');
@@ -297,10 +256,9 @@ export class ProductsService {
     }
 
     if (dto.categoryId !== undefined) {
-      const category = await this.prisma.category.findUnique({
-        where: { id: dto.categoryId },
-        select: { id: true },
-      });
+      const category = await this.productsRepository.findCategoryId(
+        dto.categoryId,
+      );
 
       if (!category) {
         throw new NotFoundException('Category not found');
@@ -316,22 +274,7 @@ export class ProductsService {
     }
 
     try {
-      const updatedProduct = await this.prisma.product.update({
-        where: { id },
-        data,
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          description: true,
-          price: true,
-          stock: true,
-          isActive: true,
-          categoryId: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
+      const updatedProduct = await this.productsRepository.update(id, data);
       await this.redis.deleteByPattern(ACTIVE_PRODUCTS_CATALOG_CACHE_PATTERN);
       await this.redis.del(this.getActiveProductCacheKey(product.slug));
 
@@ -352,6 +295,7 @@ export class ProductsService {
       throw error;
     }
   }
+
   private getActiveProductCacheKey(slug: string): string {
     return `products:active:slug:${slug}:v1`;
   }

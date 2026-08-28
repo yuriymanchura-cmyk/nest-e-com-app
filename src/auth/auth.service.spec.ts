@@ -4,43 +4,35 @@ import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import * as argon2 from 'argon2';
 import { Prisma } from '../generated/prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { AuthRepository } from './auth.repository';
 import { AuthService } from './auth.service';
 
-type CreateRefreshTokenArgs = {
-  data: {
-    id: string;
-    userId: string;
-    tokenHash: string;
-    expiresAt: Date;
-  };
+type RefreshTokenData = {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: Date;
 };
 
-let createdRefreshTokenArgs: CreateRefreshTokenArgs | undefined;
+let createdRefreshTokenArgs: RefreshTokenData | undefined;
 
-const createRefreshToken = jest.fn(
-  (args: CreateRefreshTokenArgs): Promise<void> => {
-    createdRefreshTokenArgs = args;
-    return Promise.resolve();
-  },
-);
+const createRefreshToken = jest.fn((data: RefreshTokenData): Promise<void> => {
+  createdRefreshTokenArgs = data;
+  return Promise.resolve();
+});
 
 describe('AuthService', () => {
   let authService: AuthService;
 
-  const prismaService = {
-    user: {
-      findUnique: jest.fn(),
-      create: jest.fn(),
-    },
-    refreshToken: {
-      create: createRefreshToken,
-    },
-  };
-
   const jwtService = {
     signAsync: jest.fn(),
     decode: jest.fn(),
+  };
+
+  const authRepository = {
+    findUserByEmail: jest.fn(),
+    createUser: jest.fn(),
+    createRefreshToken,
   };
 
   const configService = {
@@ -51,10 +43,7 @@ describe('AuthService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
-        {
-          provide: PrismaService,
-          useValue: prismaService,
-        },
+        { provide: AuthRepository, useValue: authRepository },
         {
           provide: JwtService,
           useValue: jwtService,
@@ -70,15 +59,15 @@ describe('AuthService', () => {
     jest.resetAllMocks();
     createdRefreshTokenArgs = undefined;
     createRefreshToken.mockImplementation(
-      (args: CreateRefreshTokenArgs): Promise<void> => {
-        createdRefreshTokenArgs = args;
+      (data: RefreshTokenData): Promise<void> => {
+        createdRefreshTokenArgs = data;
         return Promise.resolve();
       },
     );
   });
 
   it('throws ConflictException when email is already registered', async () => {
-    prismaService.user.findUnique.mockResolvedValue({ id: 'user-id' });
+    authRepository.findUserByEmail.mockResolvedValue({ id: 'user-id' });
 
     await expect(
       authService.register({
@@ -87,10 +76,10 @@ describe('AuthService', () => {
       }),
     ).rejects.toThrow(ConflictException);
 
-    expect(prismaService.user.findUnique).toHaveBeenCalledWith({
-      where: { email: 'test@example.com' },
-    });
-    expect(prismaService.user.create).not.toHaveBeenCalled();
+    expect(authRepository.findUserByEmail).toHaveBeenCalledWith(
+      'test@example.com',
+    );
+    expect(authRepository.createUser).not.toHaveBeenCalled();
   });
 
   it('creates a user when email is available', async () => {
@@ -101,8 +90,8 @@ describe('AuthService', () => {
       createdAt: new Date('2026-08-09T00:00:00.000Z'),
     };
 
-    prismaService.user.findUnique.mockResolvedValue(null);
-    prismaService.user.create.mockResolvedValue(createdUser);
+    authRepository.findUserByEmail.mockResolvedValue(null);
+    authRepository.createUser.mockResolvedValue(createdUser);
 
     const result = await authService.register({
       email: ' New@Example.com ',
@@ -110,12 +99,15 @@ describe('AuthService', () => {
     });
 
     expect(result).toEqual(createdUser);
-    expect(prismaService.user.create).toHaveBeenCalledTimes(1);
+    expect(authRepository.createUser).toHaveBeenCalledWith(
+      'new@example.com',
+      expect.any(String),
+    );
   });
 
   it('maps a unique email constraint error to ConflictException', async () => {
-    prismaService.user.findUnique.mockResolvedValue(null);
-    prismaService.user.create.mockRejectedValue(
+    authRepository.findUserByEmail.mockResolvedValue(null);
+    authRepository.createUser.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: '7.9.1',
@@ -134,7 +126,7 @@ describe('AuthService', () => {
     const password = 'secure-password-123';
     const passwordHash = await argon2.hash(password);
 
-    prismaService.user.findUnique.mockResolvedValue({
+    authRepository.findUserByEmail.mockResolvedValue({
       id: 'user-id',
       email: 'user@example.com',
       passwordHash,
@@ -169,11 +161,11 @@ describe('AuthService', () => {
       throw new Error('Refresh token session was not created');
     }
 
-    expect(createdRefreshTokenArgs.data.userId).toBe('user-id');
-    expect(typeof createdRefreshTokenArgs.data.id).toBe('string');
-    expect(typeof createdRefreshTokenArgs.data.tokenHash).toBe('string');
-    expect(createdRefreshTokenArgs.data.tokenHash).not.toBe('refresh-token');
-    expect(createdRefreshTokenArgs.data.expiresAt).toEqual(
+    expect(createdRefreshTokenArgs.userId).toBe('user-id');
+    expect(typeof createdRefreshTokenArgs.id).toBe('string');
+    expect(typeof createdRefreshTokenArgs.tokenHash).toBe('string');
+    expect(createdRefreshTokenArgs.tokenHash).not.toBe('refresh-token');
+    expect(createdRefreshTokenArgs.expiresAt).toEqual(
       new Date(1780000000 * 1000),
     );
 
@@ -186,7 +178,7 @@ describe('AuthService', () => {
   it('rejects login with a wrong password', async () => {
     const passwordHash = await argon2.hash('correct-password-123');
 
-    prismaService.user.findUnique.mockResolvedValue({
+    authRepository.findUserByEmail.mockResolvedValue({
       id: 'user-id',
       email: 'user@example.com',
       passwordHash,
@@ -205,7 +197,7 @@ describe('AuthService', () => {
   });
 
   it('rejects login for an inactive user', async () => {
-    prismaService.user.findUnique.mockResolvedValue({
+    authRepository.findUserByEmail.mockResolvedValue({
       id: 'user-id',
       email: 'user@example.com',
       passwordHash: 'unused-password-hash',

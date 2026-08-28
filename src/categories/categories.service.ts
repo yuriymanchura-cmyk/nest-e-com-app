@@ -1,20 +1,15 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
+import { CategoriesRepository } from './categories.repository';
 
 @Injectable()
 export class CategoriesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly categoriesRepository: CategoriesRepository) {}
 
   async create(dto: CreateCategoryDto) {
     try {
-      return await this.prisma.category.create({
-        data: {
-          name: dto.name.trim(),
-          slug: dto.slug,
-        },
-      });
+      return await this.categoriesRepository.create(dto);
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -28,15 +23,6 @@ export class CategoriesService {
   }
 
   async findAll() {
-    return this.prisma.category.findMany({
-      orderBy: {
-        name: 'asc',
-      },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-      },
-    });
+    return this.categoriesRepository.findAll();
   }
 }

@@ -3,7 +3,7 @@ import { getQueueToken } from '@nestjs/bullmq';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ORDER_PAID_JOB } from '../orders/jobs/order-paid.job';
 import { OrderStatus, PaymentStatus } from '../generated/prisma/enums';
-import { PrismaService } from '../prisma/prisma.service';
+import { PaymentsRepository } from './payments.repository';
 import { PaymentsService } from './payments.service';
 import { StripeService } from './stripe.service';
 
@@ -30,11 +30,9 @@ describe('PaymentsService', () => {
     },
   };
 
-  const prismaService = {
-    payment: {
-      findUnique: jest.fn(),
-    },
-    $transaction: jest.fn(),
+  const paymentsRepository = {
+    findByProviderPaymentId: jest.fn(),
+    transaction: jest.fn(),
   };
 
   const stripeService = {
@@ -48,7 +46,7 @@ describe('PaymentsService', () => {
   beforeEach(async () => {
     jest.resetAllMocks();
 
-    prismaService.$transaction.mockImplementation(
+    paymentsRepository.transaction.mockImplementation(
       async (callback: TransactionCallback) => callback(transactionClient),
     );
 
@@ -56,8 +54,8 @@ describe('PaymentsService', () => {
       providers: [
         PaymentsService,
         {
-          provide: PrismaService,
-          useValue: prismaService,
+          provide: PaymentsRepository,
+          useValue: paymentsRepository,
         },
         {
           provide: ConfigService,
@@ -82,7 +80,7 @@ describe('PaymentsService', () => {
       type: 'payment_intent.succeeded',
       data: { object: { id: 'pi_succeeded' } },
     });
-    prismaService.payment.findUnique.mockResolvedValue({
+    paymentsRepository.findByProviderPaymentId.mockResolvedValue({
       id: 'payment-id',
       status: PaymentStatus.PENDING,
       orderId: 'order-id',
@@ -97,14 +95,9 @@ describe('PaymentsService', () => {
       ),
     ).resolves.toEqual({ received: true });
 
-    expect(prismaService.payment.findUnique).toHaveBeenCalledWith({
-      where: { providerPaymentId: 'pi_succeeded' },
-      select: {
-        id: true,
-        status: true,
-        orderId: true,
-      },
-    });
+    expect(paymentsRepository.findByProviderPaymentId).toHaveBeenCalledWith(
+      'pi_succeeded',
+    );
     expect(transactionClient.payment.updateMany).toHaveBeenCalledWith({
       where: {
         id: 'payment-id',
@@ -141,7 +134,7 @@ describe('PaymentsService', () => {
       type: 'payment_intent.payment_failed',
       data: { object: { id: 'pi_failed' } },
     });
-    prismaService.payment.findUnique.mockResolvedValue({
+    paymentsRepository.findByProviderPaymentId.mockResolvedValue({
       id: 'payment-id',
       status: PaymentStatus.PENDING,
       orderId: 'order-id',
@@ -171,7 +164,7 @@ describe('PaymentsService', () => {
       type: 'payment_intent.succeeded',
       data: { object: { id: 'pi_duplicate' } },
     });
-    prismaService.payment.findUnique.mockResolvedValue({
+    paymentsRepository.findByProviderPaymentId.mockResolvedValue({
       id: 'payment-id',
       status: PaymentStatus.SUCCEEDED,
       orderId: 'order-id',
