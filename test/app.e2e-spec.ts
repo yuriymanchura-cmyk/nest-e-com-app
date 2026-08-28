@@ -4,8 +4,10 @@ import type { Application } from 'express';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
+import { HttpExceptionFilter } from '../src/common/http-exception/http-exception.filter';
 import { AppModule } from '../src/app.module';
 import { Role } from '../src/generated/prisma/enums';
+import { NotificationsService } from '../src/notifications/notifications.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
 
@@ -37,6 +39,32 @@ function hasId(value: unknown): value is { id: string } {
     value !== null &&
     'id' in value &&
     typeof value.id === 'string'
+  );
+}
+
+function hasErrorResponse(value: unknown): value is {
+  statusCode: number;
+  message: string | string[];
+  error: string;
+  requestId: string;
+  timestamp: string;
+  path: string;
+} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'statusCode' in value &&
+    typeof value.statusCode === 'number' &&
+    'message' in value &&
+    (typeof value.message === 'string' || Array.isArray(value.message)) &&
+    'error' in value &&
+    typeof value.error === 'string' &&
+    'requestId' in value &&
+    typeof value.requestId === 'string' &&
+    'timestamp' in value &&
+    typeof value.timestamp === 'string' &&
+    'path' in value &&
+    typeof value.path === 'string'
   );
 }
 
@@ -92,7 +120,12 @@ describe('AppController (e2e)', () => {
   beforeEach(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(NotificationsService)
+      .useValue({
+        sendOrderPaidConfirmation: jest.fn(),
+      })
+      .compile();
 
     app = moduleFixture.createNestApplication();
     const expressApp = app.getHttpAdapter().getInstance() as Application;
@@ -104,6 +137,7 @@ describe('AppController (e2e)', () => {
         transform: true,
       }),
     );
+    app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
 
     const redisService = app.get(RedisService);
@@ -123,6 +157,29 @@ describe('AppController (e2e)', () => {
       .get('/health')
       .expect(200)
       .expect({ status: 'ok', database: 'up', redis: 'up' });
+  });
+
+  it('returns a correlated error response for an HTTP exception', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/products/does-not-exist')
+      .expect(404);
+
+    const responseBody: unknown = response.body;
+
+    if (!hasErrorResponse(responseBody)) {
+      throw new Error('Expected a standardized error response');
+    }
+
+    expect(response.headers['x-request-id']).toBe(responseBody.requestId);
+    expect(responseBody).toMatchObject({
+      statusCode: 404,
+      message: 'Product not found',
+      error: 'Not Found',
+      path: '/products/does-not-exist',
+    });
+    expect(new Date(responseBody.timestamp).toString()).not.toBe(
+      'Invalid Date',
+    );
   });
 
   it('/auth/login (POST)', async () => {
@@ -170,7 +227,16 @@ describe('AppController (e2e)', () => {
       await login().expect(401);
     }
 
-    await login().expect(429);
+    const response = await login().expect(429);
+    const responseBody: unknown = response.body;
+
+    if (!hasErrorResponse(responseBody)) {
+      throw new Error('Expected a standardized throttling error response');
+    }
+
+    expect(response.headers['retry-after']).toMatch(/^\d+$/);
+    expect(Number(response.headers['retry-after'])).toBeGreaterThan(0);
+    expect(responseBody.message).toBe('Too many requests. Try again later.');
   });
 
   it('/auth/me (GET) rejects unauthenticated requests', () => {

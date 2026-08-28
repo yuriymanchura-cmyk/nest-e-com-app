@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nest_user
+          POSTGRES_PASSWORD: nest_password
+          POSTGRES_DB: nest_commerce_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nest_user -d nest_commerce_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://nest_user:nest_password@localhost:5432/nest_commerce_test?schema=public
+      REDIS_URL: redis://localhost:6379/1
+      CORS_ORIGIN: http://localhost:5173
+      JWT_ACCESS_SECRET: ci-access-secret-with-at-least-thirty-two-characters
+      JWT_ACCESS_TOKEN_TTL: 15m
+      JWT_REFRESH_SECRET: ci-refresh-secret-with-at-least-thirty-two-characters
+      JWT_REFRESH_TOKEN_TTL: 7d
+      MOCK_PAYMENT_WEBHOOK_SECRET: ci-mock-payment-webhook-secret
+      STRIPE_SECRET_KEY: sk_test_ci_placeholder_key
+      STRIPE_WEBHOOK_SECRET: whsec_ci_placeholder_secret
+      RESEND_API_KEY: re_ci_placeholder_key
+      EMAIL_FROM: orders@example.com
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Apply database migrations
+        run: npx prisma migrate deploy
+
+      - name: Check lint
+        run: npm run lint:check
+
+      - name: Build application
+        run: npm run build
+
+      - name: Run unit tests
+        run: npm run test
+
+      - name: Run end-to-end tests
+        run: npm run test:e2e
