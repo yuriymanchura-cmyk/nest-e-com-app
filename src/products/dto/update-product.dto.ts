@@ -1,8 +1,10 @@
-import { PartialType, ApiPropertyOptional } from '@nestjs/swagger';
-import { CreateProductDto } from './create-product.dto';
+import { ApiPropertyOptional, OmitType, PartialType } from '@nestjs/swagger';
 import { IsBoolean, IsOptional } from 'class-validator';
+import { CreateProductDto } from './create-product.dto';
 
-export class UpdateProductDto extends PartialType(CreateProductDto) {
+export class UpdateProductDto extends PartialType(
+  OmitType(CreateProductDto, ['stock'] as const),
+) {
   @IsOptional()
   @IsBoolean()
   @ApiPropertyOptional({

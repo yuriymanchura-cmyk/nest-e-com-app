@@ -6,7 +6,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { HttpExceptionFilter } from '../src/common/http-exception/http-exception.filter';
 import { AppModule } from '../src/app.module';
-import { Role } from '../src/generated/prisma/enums';
+import { InventoryMovementType, Role } from '../src/generated/prisma/enums';
 import { NotificationsService } from '../src/notifications/notifications.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { RedisService } from '../src/redis/redis.service';
@@ -511,6 +511,25 @@ describe('AppController (e2e)', () => {
         categoryId: category.id,
       });
 
+      const initialStockMovement =
+        await prisma.inventoryMovement.findFirstOrThrow({
+          where: {
+            productId: createResponse.body.id,
+            type: InventoryMovementType.INITIAL_STOCK,
+          },
+          select: {
+            quantity: true,
+            stockBefore: true,
+            stockAfter: true,
+          },
+        });
+
+      expect(initialStockMovement).toEqual({
+        quantity: productDto.stock,
+        stockBefore: 0,
+        stockAfter: productDto.stock,
+      });
+
       await request(app.getHttpServer()).get('/products').expect(200);
 
       const cachedProductResponse = await request(app.getHttpServer())
@@ -534,14 +553,20 @@ describe('AppController (e2e)', () => {
       const updateResponse = await request(app.getHttpServer())
         .patch(`/products/${createResponse.body.id}`)
         .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
-        .send({ price: '79.99', stock: 7 })
+        .send({ price: '79.99' })
         .expect(200);
 
       expect(updateResponse.body).toMatchObject({
         id: createResponse.body.id,
         price: '79.99',
-        stock: 7,
+        stock: productDto.stock,
       });
+
+      await request(app.getHttpServer())
+        .patch(`/products/${createResponse.body.id}`)
+        .set('Authorization', `Bearer ${adminLoginResponse.body.accessToken}`)
+        .send({ stock: 7 })
+        .expect(400);
 
       await request(app.getHttpServer())
         .patch(`/products/${createResponse.body.id}`)
@@ -622,6 +647,9 @@ describe('AppController (e2e)', () => {
         .get('/products/does-not-exist')
         .expect(404);
     } finally {
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
+      });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
       await prisma.user.deleteMany({ where: { email } });
@@ -753,6 +781,9 @@ describe('AppController (e2e)', () => {
       expect(clearResponse.body.items).toEqual([]);
     } finally {
       await prisma.user.deleteMany({ where: { email } });
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
+      });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
     }
@@ -838,6 +869,25 @@ describe('AppController (e2e)', () => {
       });
       expect(updatedProduct.stock).toBe(3);
 
+      const movement = await prisma.inventoryMovement.findFirstOrThrow({
+        where: {
+          productId: product.id,
+          orderId: checkoutResponse.body.id,
+          type: InventoryMovementType.ORDER_PLACED,
+        },
+        select: {
+          quantity: true,
+          stockBefore: true,
+          stockAfter: true,
+        },
+      });
+
+      expect(movement).toEqual({
+        quantity: 2,
+        stockBefore: 5,
+        stockAfter: 3,
+      });
+
       const cartResponse = await request(app.getHttpServer())
         .get('/cart')
         .set('Authorization', authorization)
@@ -888,6 +938,9 @@ describe('AppController (e2e)', () => {
     } finally {
       await prisma.order.deleteMany({ where: { user: { email } } });
       await prisma.user.deleteMany({ where: { email } });
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
+      });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
     }
@@ -979,6 +1032,9 @@ describe('AppController (e2e)', () => {
     } finally {
       await prisma.order.deleteMany({ where: { user: { email } } });
       await prisma.user.deleteMany({ where: { email } });
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
+      });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
     }
@@ -1074,6 +1130,9 @@ describe('AppController (e2e)', () => {
       await prisma.order.deleteMany({ where: { user: { email: ownerEmail } } });
       await prisma.user.deleteMany({
         where: { email: { in: [ownerEmail, otherUserEmail] } },
+      });
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
       });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
@@ -1183,6 +1242,25 @@ describe('AppController (e2e)', () => {
       });
       expect(productAfterCancel.stock).toBe(5);
 
+      const cancelMovement = await prisma.inventoryMovement.findFirstOrThrow({
+        where: {
+          productId: product.id,
+          orderId,
+          type: InventoryMovementType.ORDER_CANCELED,
+        },
+        select: {
+          quantity: true,
+          stockBefore: true,
+          stockAfter: true,
+        },
+      });
+
+      expect(cancelMovement).toEqual({
+        quantity: 2,
+        stockBefore: 3,
+        stockAfter: 5,
+      });
+
       await request(app.getHttpServer())
         .post(`/orders/${orderId}/cancel`)
         .set('Authorization', ownerAuthorization)
@@ -1199,6 +1277,9 @@ describe('AppController (e2e)', () => {
       await prisma.order.deleteMany({ where: { user: { email: ownerEmail } } });
       await prisma.user.deleteMany({
         where: { email: { in: [ownerEmail, otherUserEmail] } },
+      });
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
       });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
@@ -1558,8 +1639,154 @@ describe('AppController (e2e)', () => {
       await prisma.user.deleteMany({
         where: { email: { in: [ownerEmail, otherUserEmail] } },
       });
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
+      });
       await prisma.product.deleteMany({ where: { slug: productSlug } });
       await prisma.category.deleteMany({ where: { slug: categorySlug } });
+    }
+  });
+
+  it('/inventory/products/:productId/restock (POST) allows admins to restock and records the actor', async () => {
+    const adminEmail = `e2e-inventory-admin-${randomUUID()}@example.com`;
+    const customerEmail = `e2e-inventory-customer-${randomUUID()}@example.com`;
+    const password = 'secure-password-123';
+    const categorySlug = `e2e-inventory-category-${randomUUID()}`;
+    const productSlug = `e2e-inventory-product-${randomUUID()}`;
+    const prisma = app.get(PrismaService);
+
+    try {
+      const category = await prisma.category.create({
+        data: {
+          name: `E2E Inventory Category ${randomUUID()}`,
+          slug: categorySlug,
+        },
+      });
+
+      const product = await prisma.product.create({
+        data: {
+          name: 'E2E Inventory Product',
+          slug: productSlug,
+          description: 'Product used by the inventory e2e test.',
+          price: '19.99',
+          stock: 5,
+          categoryId: category.id,
+        },
+      });
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: adminEmail, password })
+        .expect(201);
+
+      await prisma.user.update({
+        where: { email: adminEmail },
+        data: { role: Role.ADMIN },
+      });
+
+      const adminLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: adminEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(adminLoginResponse.body)) {
+        throw new Error('Expected an inventory admin access token');
+      }
+
+      const adminAuthorization = `Bearer ${adminLoginResponse.body.accessToken}`;
+
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ email: customerEmail, password })
+        .expect(201);
+
+      const customerLoginResponse = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: customerEmail, password })
+        .expect(200);
+
+      if (!hasAccessToken(customerLoginResponse.body)) {
+        throw new Error('Expected an inventory customer access token');
+      }
+
+      await request(app.getHttpServer())
+        .post(`/inventory/products/${product.id}/restock`)
+        .send({ quantity: 3 })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .post(`/inventory/products/${product.id}/restock`)
+        .set(
+          'Authorization',
+          `Bearer ${customerLoginResponse.body.accessToken}`,
+        )
+        .send({ quantity: 3 })
+        .expect(403);
+
+      await request(app.getHttpServer())
+        .post(`/inventory/products/${product.id}/restock`)
+        .set('Authorization', adminAuthorization)
+        .send({ quantity: 0 })
+        .expect(400);
+
+      await request(app.getHttpServer())
+        .post(`/inventory/products/${randomUUID()}/restock`)
+        .set('Authorization', adminAuthorization)
+        .send({ quantity: 3 })
+        .expect(404);
+
+      const restockResponse = await request(app.getHttpServer())
+        .post(`/inventory/products/${product.id}/restock`)
+        .set('Authorization', adminAuthorization)
+        .send({ quantity: 3 })
+        .expect(201);
+
+      expect(restockResponse.body).toMatchObject({
+        product: {
+          id: product.id,
+          slug: product.slug,
+          stock: 8,
+        },
+        movement: {
+          type: InventoryMovementType.RESTOCK,
+          quantity: 3,
+          stockBefore: 5,
+          stockAfter: 8,
+        },
+      });
+
+      const admin = await prisma.user.findUniqueOrThrow({
+        where: { email: adminEmail },
+        select: { id: true },
+      });
+      const movement = await prisma.inventoryMovement.findFirstOrThrow({
+        where: {
+          productId: product.id,
+          type: InventoryMovementType.RESTOCK,
+        },
+        select: {
+          actorUserId: true,
+          quantity: true,
+          stockBefore: true,
+          stockAfter: true,
+        },
+      });
+
+      expect(movement).toEqual({
+        actorUserId: admin.id,
+        quantity: 3,
+        stockBefore: 5,
+        stockAfter: 8,
+      });
+    } finally {
+      await prisma.inventoryMovement.deleteMany({
+        where: { product: { slug: productSlug } },
+      });
+      await prisma.product.deleteMany({ where: { slug: productSlug } });
+      await prisma.category.deleteMany({ where: { slug: categorySlug } });
+      await prisma.user.deleteMany({
+        where: { email: { in: [adminEmail, customerEmail] } },
+      });
     }
   });
 

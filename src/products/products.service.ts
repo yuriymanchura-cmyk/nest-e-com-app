@@ -62,7 +62,7 @@ export class ProductsService {
     }
 
     try {
-      const product = await this.productsRepository.create({
+      const product = await this.productsRepository.createWithInitialStock({
         data: {
           name: dto.name,
           slug: dto.slug,
@@ -233,10 +233,6 @@ export class ProductsService {
 
     if (dto.description !== undefined) {
       data.description = dto.description;
-    }
-
-    if (dto.stock !== undefined) {
-      data.stock = dto.stock;
     }
 
     if (dto.price !== undefined) {

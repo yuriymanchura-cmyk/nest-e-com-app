@@ -4,7 +4,11 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { OrderStatus, Prisma } from '../generated/prisma/client';
+import {
+  InventoryMovementType,
+  OrderStatus,
+  Prisma,
+} from '../generated/prisma/client';
 import { OrdersRepository } from './orders.repository';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { isUUID } from 'class-validator';
@@ -127,7 +131,7 @@ export class OrdersService {
         });
 
         for (const item of cart.items) {
-          const updatedProduct = await tx.product.updateMany({
+          const [updatedProduct] = await tx.product.updateManyAndReturn({
             where: {
               id: item.product.id,
               isActive: true,
@@ -140,10 +144,26 @@ export class OrdersService {
                 decrement: item.quantity,
               },
             },
+            select: {
+              id: true,
+              stock: true,
+            },
           });
-          if (updatedProduct.count !== 1) {
+
+          if (!updatedProduct) {
             throw new BadRequestException('Insufficient product stock');
           }
+
+          await tx.inventoryMovement.create({
+            data: {
+              productId: updatedProduct.id,
+              type: InventoryMovementType.ORDER_PLACED,
+              quantity: item.quantity,
+              stockBefore: updatedProduct.stock + item.quantity,
+              stockAfter: updatedProduct.stock,
+              orderId: order.id,
+            },
+          });
         }
 
         await tx.cartItem.deleteMany({
@@ -196,7 +216,7 @@ export class OrdersService {
       }
 
       for (const item of order.items) {
-        await tx.product.update({
+        const updatedProduct = await tx.product.update({
           where: {
             id: item.productId,
           },
@@ -205,8 +225,24 @@ export class OrdersService {
               increment: item.quantity,
             },
           },
+          select: {
+            id: true,
+            stock: true,
+          },
+        });
+
+        await tx.inventoryMovement.create({
+          data: {
+            productId: updatedProduct.id,
+            type: InventoryMovementType.ORDER_CANCELED,
+            quantity: item.quantity,
+            stockBefore: updatedProduct.stock - item.quantity,
+            stockAfter: updatedProduct.stock,
+            orderId: order.id,
+          },
         });
       }
+
       return tx.order.findUniqueOrThrow({
         where: {
           id: order.id,

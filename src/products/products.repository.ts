@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '../generated/prisma/client';
+import { Prisma, InventoryMovementType } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -13,9 +13,21 @@ export class ProductsRepository {
     });
   }
 
-  create(data: Prisma.ProductCreateArgs) {
-    return this.prisma.product.create({
-      ...data,
+  async createWithInitialStock(data: Prisma.ProductCreateArgs) {
+    return this.prisma.$transaction(async (tx) => {
+      const product = await tx.product.create(data);
+
+      await tx.inventoryMovement.create({
+        data: {
+          productId: product.id,
+          type: InventoryMovementType.INITIAL_STOCK,
+          quantity: product.stock,
+          stockBefore: 0,
+          stockAfter: product.stock,
+        },
+      });
+
+      return product;
     });
   }
 

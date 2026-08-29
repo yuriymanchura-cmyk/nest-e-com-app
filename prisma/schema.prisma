@@ -28,6 +28,13 @@ enum NotificationStatus {
   FAILED
 }
 
+enum InventoryMovementType {
+  INITIAL_STOCK
+  RESTOCK
+  ORDER_PLACED
+  ORDER_CANCELED
+}
+
 generator client {
   provider     = "prisma-client"
   output       = "../src/generated/prisma"
@@ -39,16 +46,17 @@ datasource db {
 }
 
 model User {
-  id            String         @id @default(uuid()) @db.Uuid
-  email         String         @unique
-  passwordHash  String
-  role          Role           @default(CUSTOMER)
-  isActive      Boolean        @default(true)
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  refreshTokens RefreshToken[]
-  cart          Cart?
-  orders        Order[]
+  id                 String              @id @default(uuid()) @db.Uuid
+  email              String              @unique
+  passwordHash       String
+  role               Role                @default(CUSTOMER)
+  isActive           Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  refreshTokens      RefreshToken[]
+  cart               Cart?
+  orders             Order[]
+  inventoryMovements InventoryMovement[] @relation("InventoryMovementActor")
 }
 
 model RefreshToken {
@@ -73,21 +81,41 @@ model Category {
 }
 
 model Product {
-  id          String      @id @default(uuid()) @db.Uuid
-  name        String
-  slug        String      @unique
-  description String      @db.Text
-  price       Decimal     @db.Decimal(10, 2)
-  stock       Int         @default(0)
-  isActive    Boolean     @default(true)
-  categoryId  String      @db.Uuid
-  category    Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  cartItems   CartItem[]
-  orderItems  OrderItem[]
+  id                 String              @id @default(uuid()) @db.Uuid
+  name               String
+  slug               String              @unique
+  description        String              @db.Text
+  price              Decimal             @db.Decimal(10, 2)
+  stock              Int                 @default(0)
+  isActive           Boolean             @default(true)
+  categoryId         String              @db.Uuid
+  category           Category            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  cartItems          CartItem[]
+  orderItems         OrderItem[]
+  inventoryMovements InventoryMovement[]
 
   @@index([categoryId])
+}
+
+model InventoryMovement {
+  id          String                @id @default(uuid()) @db.Uuid
+  productId   String                @db.Uuid
+  type        InventoryMovementType
+  quantity    Int
+  stockBefore Int
+  stockAfter  Int
+  orderId     String?               @db.Uuid
+  actorUserId String?               @db.Uuid
+  actor       User?                 @relation("InventoryMovementActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  product     Product               @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([productId, createdAt])
+  @@index([orderId])
+  @@index([actorUserId])
 }
 
 model Cart {

@@ -17,6 +17,7 @@ import { RedisThrottlerStorage } from './redis/redis-throttler.storage';
 import { envValidationSchema } from './config/env.validation';
 import { RequestIdMiddleware } from './common/request-id/request-id.middleware';
 import { HttpThrottlerGuard } from './common/throttling/http-throttler.guard';
+import { InventoryModule } from './inventory/inventory.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { HttpThrottlerGuard } from './common/throttling/http-throttler.guard';
         ],
       }),
     }),
+    InventoryModule,
   ],
   controllers: [AppController],
   providers: [
